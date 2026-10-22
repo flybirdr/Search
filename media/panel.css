@@ -1,0 +1,863 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+/*
+ * 面板整体不再滚动：滚动交给「高级」区和结果区各自负责。
+ *
+ * 这样搜索框永远留在顶部，结果区能吃掉剩下的全部高度；换来的好处是结果多时
+ * 不会有「结果区被 42vh 卡住、下方空一大片」的问题。
+ * 仍然保留 html 定高 + overflow: hidden 这两条：否则 body 的 overflow 会被
+ * 传播到视口，宽度会随内容高度变化（见 0.1.14 的抖动问题）。
+ */
+html {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  /* 与视口等高，作为固定高度的 flex 容器基准 */
+  height: 100%;
+  font-family: var(--vscode-font-family);
+  font-size: 12px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  overflow: hidden;
+  /* 高度突变时不要让浏览器「滚动锚定」再动一次滚动位置 */
+  overflow-anchor: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* 必须显式声明：.advanced / .rec-body 等自带的 display 会盖掉 [hidden] 的 UA 样式 */
+[hidden] {
+  display: none !important;
+}
+
+.fsearch {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* 撑满视口高度，多出来的高度分给结果区；内容真的超出时由高级区让位 */
+  height: 100%;
+  /* 内边距放在这里而不是 body：body 是固定高度的容器，padding 放外层会顶破 100% */
+  padding: 8px 10px 10px;
+}
+
+/* 顶部几件固定高度，任何情况下都不许被压扁 */
+.search-row,
+.sub-row {
+  flex: none;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.field.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.lbl {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+input[type='text'] {
+  width: 100%;
+  height: 26px;
+  /* 显式钉死行高（26px - 上下边框）：不写时部分 Linux 字体栈用 normal 行高，
+     文字整体偏上，通配符 '*' 这类高重心字形几乎顶到边框 */
+  line-height: 24px;
+  padding: 0 6px;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  outline: none;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+}
+
+input[type='text']:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+input[type='text']::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.search-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+
+.search-row button {
+  flex: none;
+}
+
+/*
+ * 搜索 / 全部、替换 / 全部 四颗操作按钮：grid 的 1fr 列保证每行两颗等宽，
+ * min-width 让两行之间也严格同宽（英文 Search/Replace 字符数不同也成立）。
+ */
+.row-actions {
+  flex: none;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 6px;
+}
+
+.row-actions button {
+  min-width: 72px;
+  height: 26px;
+  text-align: center;
+}
+
+button {
+  font-family: inherit;
+  font-size: 11px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 2px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.12));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, rgba(128, 128, 128, 0.2));
+}
+
+button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+button.primary {
+  height: 26px;
+  padding: 0 14px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+button.primary:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button.link {
+  height: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--vscode-textLink-foreground);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  /* 全局 button 用 overflow:hidden 做省略号，会把旋转后的箭头裁掉一半 */
+  overflow: visible;
+}
+
+button.link:hover {
+  text-decoration: underline;
+  background: transparent;
+}
+
+.sub-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 提示占满左侧可收缩空间，把「高级」顶到最右 */
+.sub-row > .hint {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sub-row > button {
+  flex: none;
+}
+
+.chev {
+  /* 结果分组头的小箭头：给定方形盒 + 不参与 flex 收缩：否则窄面板下会被压扁，
+     旋转后越界被裁。高级切换按钮已不用箭头（只显示文字）。 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+/*
+ * 箭头本体用两条边框画（旋转只作用在它自己——字符 › 的字形不在盒中心，
+ * 绕盒中心转会看起来「甩出去」；几何箭头绕中心旋转才是预期观感）。
+ * L 形（右+下边框）的视觉质心偏向右下，旋转前先沿对角平移回盒中心，
+ * 否则展开态（尖角朝下）会看起来偏下不居中。默认折叠朝右，展开朝下。
+ */
+.chev::before {
+  content: '';
+  width: 3.5px;
+  height: 3.5px;
+  border-right: 1.2px solid currentColor;
+  border-bottom: 1.2px solid currentColor;
+  /* L 形质心偏移按 3.5/1.2 几何重算为 0.58px */
+  transform: rotate(-45deg) translate(-0.58px, -0.58px);
+  transition: transform 80ms linear;
+}
+
+.chev.open::before {
+  transform: rotate(45deg) translate(-0.58px, -0.58px);
+}
+
+.hint {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 2px;
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  margin-top: 2px;
+  /*
+   * 高度策略：高级区不允许被结果区挤压（flex-shrink: 0）。
+   * 结果条目展开时结果区在自己内部滚动，吃下全部高度变化，
+   * 高级区保持自然高度纹丝不动——此前 shrink 1 会在收缩阶段
+   * 被按比例分走一块高度，表现为「展开结果把高级区顶起来」。
+   * max-height 只是视口过矮时的保险丝：高级区封顶内部滚动，
+   * 不至于把结果区挤没；平时自然高度远低于它，不生效。
+   */
+  flex: 0 0 auto;
+  max-height: 75%;
+  overflow-y: auto;
+  /*
+   * 不用 scrollbar-gutter: stable：常驻槽位会把高级区里右对齐的按钮
+   * （替换/全部、标记/清除）整体往左推一个滚动条宽度，和搜索行的按钮错位。
+   * 改成滚动条按需出现；偶发滚动条走下面的细样式，宽度跳变小。
+   */
+}
+
+.groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 6px;
+}
+
+fieldset {
+  margin: 0;
+  padding: 6px 8px 7px;
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  border-radius: 2px;
+}
+
+legend {
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.opt {
+  display: block;
+  font-size: 11px;
+  line-height: 1.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.opt input {
+  vertical-align: -1px;
+  margin: 0 3px 0 0;
+}
+
+.muted {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* 替换框行：输入框占满，替换 / 全部 两颗按钮固定在右侧。
+   按钮复用 .row-actions（与搜索行同款 grid 等宽布局），高度对齐 26px。 */
+.replace-row {
+  display: flex;
+  gap: 6px;
+}
+
+.replace-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.replace-row .row-actions {
+  flex: none;
+}
+
+/* 状态行：状态文字在左，「停止」按钮紧随其后。
+   不能用 display:contents——外层容器是纵向 flex，contents 会让两个子元素
+   变成它的成员，按钮就被排到文字下面一行去了。 */
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.status {
+  min-height: 14px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  padding: 2px 0;
+  flex: none;
+}
+
+/*
+ * 没有状态文字时整行收起。否则「高级」那一行和搜索结果之间会白留一行高度
+ * （min-height 的 14px + 上下各 2px + 外层 gap），空面板里看起来就是一块空白。
+ * 只在真正空的时候收起：搜索中 / 报错时立刻占位，不会把下面的内容顶得跳来跳去。
+ */
+.status:empty {
+  display: none;
+}
+
+/* 状态行变成真实盒子后，空态收起要整行一起判断：
+   文字为空且停止按钮隐藏时收起，避免面板里白留一行高度 */
+.status-row:not(:has(.status:not(:empty))):not(:has(#btnStop:not([hidden]))) {
+  display: none;
+}
+
+.status[data-tone='error'] {
+  color: var(--vscode-errorForeground);
+}
+
+.status[data-tone='warn'] {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.status[data-busy='true']::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 700ms linear infinite;
+  vertical-align: -1px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- 结果记录 ---------- */
+
+.results-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  border-top: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.25));
+  padding-top: 6px;
+}
+
+/* 结果头分左右两组：左边标题 + 标记动作，右边导航与批量清理。
+   组内用自己的 gap，避免 space-between 把单个按钮摊满整行 */
+.head-left,
+.head-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 左组吃满剩余宽度，把右组推到行尾；标题窄时省略号 */
+.head-left {
+  flex: 1 1 auto;
+}
+
+/* 「第 i / n 处」位置指示：随导航更新，位于上一个/下一个按钮左侧 */
+.hit-pos {
+  flex: none;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hist-summary {
+  /* 不再吃满剩余宽度（左组整体负责把右组推到行尾），
+     标题只按内容占位，窄时省略号 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.results {
+  /* 结果区自己滚动，高度由分隔条控制；面板主体仍按内容滚动 */
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /*
+   * 不用 scrollbar-gutter: stable：常驻槽位在没有滚动条的内容旁边
+   * 留一条空白竖带，非常难看。滚动条按需出现，走下面的细样式；
+   * 折叠/展开卡片时内容宽度可能抖一个滚动条宽度，可接受。
+   */
+  overflow-anchor: none;
+}
+
+/* 高级区和结果区的滚动条统一成细样式：贴边半透明，不占视觉重心 */
+.advanced::-webkit-scrollbar,
+.results::-webkit-scrollbar {
+  width: 8px;
+}
+
+.advanced::-webkit-scrollbar-thumb,
+.results::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background);
+}
+
+.advanced::-webkit-scrollbar-thumb:hover,
+.results::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+.advanced::-webkit-scrollbar-track,
+.results::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.results-pane {
+  position: relative; /* 悬浮文件标题的定位基准 */
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /*
+   * 高度策略（0.1.56 起删掉分隔条与旧的高度上限变量）：
+   * 纯 flex —— 高级区自然高度（挤了内部滚动），结果区吃满剩余空间。
+   * 没有任何 JS 重算与 vh 变量，内容变化不再引起面板高度跳变。
+   * min-height 96px 保住空态下限（is-empty 时归零）。
+   */
+  flex: 1 1 auto;
+  min-height: 96px;
+  overflow: hidden;
+}
+
+/*
+ * 一条结果都没有时不参与拉伸：空面板里没必要占掉大半屏，
+ * 盒子贴着「空提示」就好；有结果时再恢复拉伸与 96px 下限。
+ */
+.results-pane.is-empty {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.record {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 3px;
+  min-width: 0;
+  /* 结果区是「固定高度 + 自己滚动」的 flex 容器，卡片不能被压缩成半截 */
+  flex: none;
+}
+
+.results > .empty {
+  flex: none;
+}
+
+.record.collapsed {
+  background: var(--vscode-editorWidget-background, transparent);
+}
+
+.rec-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding: 1px 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.rec-head:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.rec-head:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.rec-q {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+}
+
+.rec-total {
+  flex: none;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+.rec-files {
+  flex: none;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+.rec-ms,
+.rec-size {
+  flex: none;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+.ver {
+  margin-left: 6px;
+  padding: 0 3px;
+  border-radius: 2px;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.16));
+  opacity: 0.9;
+}
+
+.rec-time {
+  flex: none;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+.rec-close {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0;
+}
+
+.rec-head:hover .rec-close,
+.rec-close:focus-visible {
+  opacity: 1;
+}
+
+.rec-close:hover {
+  background: transparent;
+  color: var(--vscode-foreground);
+}
+
+/* 横向滚动容器：高度随内容自适应，所以 overflow-y 用 hidden 不会裁掉内容 */
+.rec-body {
+  padding: 0 4px 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.rec-body > * {
+  width: max-content;
+  min-width: 100%;
+}
+
+.rec-body > .empty,
+.rec-body > .notice {
+  width: 100%;
+}
+
+.rec-body::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+.rec-body::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background);
+}
+
+.rec-body::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+.rec-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  /* 左 14px 与条目行缩进对齐：提示文字的左边缘要压在结果条目的
+   * 行号左侧同一条竖线上，否则它比结果整体往左凸出一截，看着像另一栏。 */
+  /* 左 14px 与条目行缩进对齐（0.1.86 的对齐要求） */
+  padding: 4px 4px 6px 14px;
+  white-space: normal;
+}
+
+/* 「统计完整数量」按钮：默认搜索到上限就停，点它才扫一遍拿真实总数 */
+.notice-btn {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--vscode-contrastBorder, transparent);
+  background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+  cursor: pointer;
+}
+
+.notice-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}
+
+.notice-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/*
+ * 悬浮文件标题：滚过某个文件标题行后，悬浮在结果区顶部指示当前位置，
+ * 点击整条折叠该文件。绝对定位不占内容流（位置由 JS 对齐 .results），
+ * 背景必须实底——行从它下面滚过时要能盖住。高度与 .v-head 一致锁 21px。
+ */
+.sticky-head {
+  position: absolute;
+  z-index: 3;
+  background: var(--vscode-sideBar-background, var(--vscode-editorWidget-background));
+}
+
+/*
+ * 进行中卡片末尾的活提示：结果采用流式插入，分组不断长在它上面，
+ * 这一行始终留在最底部，让「还在搜」和「搜完了」一眼可分。
+ */
+.rec-pending {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  /* 与 .r-item / .notice 的左侧内边距一致，三条提示文案落在同一条竖线上 */
+  padding: 3px 4px 5px 14px;
+}
+
+.rec-pending::before {
+  content: '';
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 700ms linear infinite;
+}
+
+/*
+ * 扁平行容器：本卡片所有 21px 行（文件标题行 + 结果条目行）的定位上下文，
+ * 高度由 JS 按「行数 × 21px」显式撑出（真实滚动条来自它）。
+ * width 不吃 .rec-body > * 的 max-content——横向宽度由 JS 按最宽行撑 minWidth。
+ */
+.rec-body > .rows {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+/*
+ * 文件标题行：与结果条目行（.r-item）同一坐标系，统一 21px。观感沿用原
+ * 分组头（chev / 文件名 / 处数 / 路径），只是不再有独立包装层和下边框。
+ */
+.v-head,
+.sticky-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 21px;
+  padding: 0 2px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.v-head {
+  position: absolute;
+  left: 0;
+  width: max-content;
+  min-width: 100%;
+}
+
+.v-head:hover,
+.sticky-head:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* 悬浮条悬停必须自己垫实底：--vscode-list-hoverBackground 是半透明色
+ * （设计上叠在列表行上），悬浮条直接盖在滚动内容上，不垫底就会透出下面的行。
+ * 用渐变把主题底色垫在高光层下面，观感与标题行悬停一致。 */
+.sticky-head:hover {
+  background:
+    linear-gradient(var(--vscode-list-hoverBackground), var(--vscode-list-hoverBackground)),
+    var(--vscode-sideBar-background, var(--vscode-editorWidget-background));
+}
+
+.v-head:focus-visible,
+.sticky-head:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.v-head .chev,
+.sticky-head .chev {
+  color: var(--vscode-descriptionForeground);
+}
+
+.g-label {
+  flex: none;
+  font-weight: 500;
+}
+
+.g-count {
+  flex: none;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
+.v-head .detail,
+.sticky-head .detail {
+  flex: 0 1 auto;
+  font-weight: 400;
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 标题行的路径不设上限：行宽本就是 max-content，长路径完整显示（横向滚动
+ * 兜底）。悬浮条悬浮在固定宽度的面板上，超长路径仍需截断。 */
+.sticky-head .detail {
+  max-width: 240px;
+}
+
+/*
+ * 虚拟滚动的行：绝对定位在 .rows 里（top 由 JS 按 index × 21 设置），
+ * 高度锁死 21px——整条链路（容器高度、可视区间换算、导航定位）都依赖这个
+ * 值是精确整数，不能用 line-height 浮点估算。常态下只有视口 ±20 行在 DOM 里。
+ * 条目行比文件标题行缩进一档（12px），层级感由缩进表达而不是嵌套盒子。
+ */
+.r-item {
+  position: absolute;
+  left: 0;
+  /* 宽 = max(内容, 容器)：窄行也要占满容器，悬停/选中高亮才是一整条；
+   * 宽行（横向滚动）时盒子跟着内容走，溢出部分高亮不缺角。 */
+  width: max-content;
+  min-width: 100%;
+  display: flex;
+  gap: 6px;
+  height: 21px;
+  line-height: 21px;
+  /* 左 14px = 条目行比文件标题行缩进一档（扁平结构的层级感），
+   * 右 4px 与提示行对齐 */
+  padding: 0 4px 0 14px;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.r-item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.r-item.active {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.r-item:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.r-line {
+  flex: none;
+  min-width: 32px;
+  padding-right: 2px;
+  text-align: right;
+  color: var(--vscode-editorLineNumber-foreground);
+}
+
+.r-item.active .r-line {
+  color: inherit;
+  opacity: 0.7;
+}
+
+/* 整行展开：不裁行首、不折行，宽度交给内容决定，外层容器出横向滚动条。
+ * 行号（.r-line）右对齐贴着代码，便于竖向扫读；代码本身始终从行首左对齐。 */
+.r-code {
+  flex: none;
+  white-space: pre;
+  text-align: left;
+}
+
+mark {
+  background: var(--vscode-editor-findMatchHighlightBackground);
+  color: inherit;
+  border-radius: 2px;
+}
+
+.r-item.active mark {
+  background: var(--vscode-editor-findMatchBackground);
+}
+
+.empty {
+  padding: 12px 2px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  white-space: normal;
+}

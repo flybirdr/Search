@@ -1,0 +1,5 @@
+# wasm32 构建开启 v128 SIMD：内核依赖链（regex-automata → memchr）的
+# wasm 向量化路径按 target_feature=simd128 在编译期启用。V8（Node 16.4+ /
+# Chrome 91+）稳定支持，无需运行时探测。
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

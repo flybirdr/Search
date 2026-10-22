@@ -1,0 +1,8 @@
+node_modules/
+dist/
+rust-core/target/
+*.vsix
+rustup-init.exe
+.DS_Store
+.workbuddy/
+test/.tmp/

@@ -1,0 +1,318 @@
+{
+  "name": "search",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "0.1.123",
+  "publisher": "flysearch",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "find",
+    "replace",
+    "search",
+    "regex",
+    "count"
+  ],
+  "icon": "media/icon.png",
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:flySearch.panel"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "flySearch",
+          "title": "%viewContainer.title%",
+          "icon": "media/sidebar.svg"
+        }
+      ]
+    },
+    "views": {
+      "flySearch": [
+        {
+          "id": "flySearch.panel",
+          "name": "%view.name%",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "flySearch.openPanel",
+        "title": "%command.openPanel%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.openReplace",
+        "title": "%command.openReplace%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.findNext",
+        "title": "%command.findNext%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.findPrev",
+        "title": "%command.findPrev%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.count",
+        "title": "%command.count%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.findAllInDocument",
+        "title": "%command.findAllInDocument%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.findAllOpen",
+        "title": "%command.findAllOpen%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.replaceOne",
+        "title": "%command.replaceOne%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.replaceAllInDocument",
+        "title": "%command.replaceAllInDocument%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.markAll",
+        "title": "%command.markAll%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.clearMarks",
+        "title": "%command.clearMarks%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.copyMarked",
+        "title": "%command.copyMarked%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.findInFiles",
+        "title": "%command.findInFiles%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.showLog",
+        "title": "%command.showLog%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.selfCheck",
+        "title": "%command.selfCheck%",
+        "category": "%command.category%"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "flySearch.openPanel",
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f"
+      },
+      {
+        "command": "flySearch.openReplace",
+        "key": "ctrl+alt+h",
+        "mac": "cmd+alt+h"
+      },
+      {
+        "command": "flySearch.findNext",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "flySearch.findPrev",
+        "key": "ctrl+alt+shift+n",
+        "mac": "cmd+alt+shift+n",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "flySearch.openPanel",
+        "key": "ctrl+f",
+        "mac": "cmd+f",
+        "when": "config.flySearch.takeOverFindShortcut"
+      },
+      {
+        "command": "flySearch.openReplace",
+        "key": "ctrl+h",
+        "mac": "cmd+h",
+        "when": "config.flySearch.takeOverFindShortcut"
+      }
+    ],
+    "configuration": {
+      "title": "%config.title%",
+      "properties": {
+        "flySearch.defaultMode": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "extended",
+            "regex"
+          ],
+          "enumDescriptions": [
+            "%config.defaultMode.enum.0%",
+            "%config.defaultMode.enum.1%",
+            "%config.defaultMode.enum.2%"
+          ],
+          "default": "normal",
+          "description": "%config.defaultMode%"
+        },
+        "flySearch.wrapAround": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.wrapAround%"
+        },
+        "flySearch.searchInSelection": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.searchInSelection%"
+        },
+        "flySearch.highlightAllMatches": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.highlightAllMatches%"
+        },
+        "flySearch.maxMatches": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 100,
+          "description": "%config.maxMatches%"
+        },
+        "flySearch.maxMatchesPerFile": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 1,
+          "description": "%config.maxMatchesPerFile%"
+        },
+        "flySearch.walkThreads": {
+          "type": "number",
+          "default": 0,
+          "enumDescriptions": [
+            "自动（CPU 核数/4，夹 2~8）"
+          ],
+          "minimum": -1,
+          "maximum": 16,
+          "description": "%config.walkThreads%"
+        },
+        "flySearch.walkOrder": {
+          "type": "string",
+          "enum": [
+            "fast",
+            "sorted"
+          ],
+          "default": "fast",
+          "enumDescriptions": [
+            "到达序（吞吐优先）",
+            "全局字典序（结果可复现）"
+          ],
+          "description": "%config.walkOrder%"
+        },
+        "flySearch.maxFileSizeKB": {
+          "type": "number",
+          "default": 512000,
+          "description": "%config.maxFileSizeKB%"
+        },
+        "flySearch.streamThresholdKB": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 0,
+          "description": "%config.streamThresholdKB%"
+        },
+        "flySearch.chunkAboveMB": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "description": "%config.chunkAboveMB%"
+        },
+        "flySearch.chunkMemoryMB": {
+          "type": "number",
+          "default": 32,
+          "minimum": 4,
+          "description": "%config.chunkMemoryMB%"
+        },
+        "flySearch.chunkCrowdMB": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "description": "%config.chunkCrowdMB%"
+        },
+        "flySearch.diskType": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ssd",
+            "hdd"
+          ],
+          "default": "auto",
+          "description": "%config.diskType%"
+        },
+        "flySearch.parallelWorkers": {
+          "type": "number",
+          "default": 0,
+          "description": "%config.parallelWorkers%"
+        },
+        "flySearch.verboseLog": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.verboseLog%"
+        },
+        "flySearch.backtrackLimit": {
+          "type": "number",
+          "default": 1000000,
+          "description": "%config.backtrackLimit%"
+        },
+        "flySearch.includeGlob": {
+          "type": "string",
+          "default": "**/*",
+          "description": "%config.includeGlob%"
+        },
+        "flySearch.excludeGlob": {
+          "type": "string",
+          "default": "",
+          "description": "%config.excludeGlob%"
+        },
+        "flySearch.takeOverFindShortcut": {
+          "type": "boolean",
+          "default": false,
+          "description": "%config.takeOverFindShortcut%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build:ext": "node esbuild.mjs",
+    "build": "npm run build:wasm && npm run build:ext",
+    "watch": "node esbuild.mjs --watch",
+    "test": "npm run build:wasm && node scripts/build-test.mjs && node scripts/check-i18n.mjs && node test/engine.test.mjs && node test/logic.test.mjs && node test/glob.test.mjs && node test/history.test.mjs && node test/inputhistory.test.mjs && node test/preview.test.mjs && node test/stream.test.mjs && node test/parallelism.test.mjs && node test/disktype.test.mjs && node test/exactcount.test.mjs && node test/chunkplan.test.mjs && node test/files.test.mjs && node test/walksession.test.mjs && node test/dirpriority.test.mjs && node test/realfs.test.mjs && node test/pool.test.mjs && node test/i18n.test.mjs && node test/panel.test.mjs && node test/smoke.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.25.0",
+    "jsdom": "^30.1.3",
+    "typescript": "^5.7.2"
+  }
+}

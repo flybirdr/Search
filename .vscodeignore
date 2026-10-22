@@ -1,0 +1,14 @@
+.vscode/**
+src/**
+test/**
+scripts/**
+rust-core/**
+node_modules/**
+dist/**/*.map
+*.ts
+tsconfig.json
+esbuild.mjs
+.gitignore
+rustup-init.exe
+.workbuddy/**
+*.vsix

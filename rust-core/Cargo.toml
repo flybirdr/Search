@@ -1,0 +1,21 @@
+[package]
+name = "search_core"
+version = "0.1.0"
+edition = "2021"
+description = "Search core for the FlySearch VS Code extension"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fancy-regex = "0.19"
+
+[profile.release]
+# 性能优先（用户明确要求，不用体积优先的 z）：3 档保留循环向化与深度内联，
+# SIMD 字节扫描才能跑满；wasm 体积从 ~1.0MB 涨到 ~1.35MB 是可接受代价
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
