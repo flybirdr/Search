@@ -46,8 +46,90 @@
     btnClearAll: $('btnClearAll'),
     btnCollapseAll: $('btnCollapseAll'),
     btnExpandAll: $('btnExpandAll'),
+    sbV: $('sbV'),
+    sbH: $('sbH'),
     pane: document.querySelector('.results-pane'),
   };
+
+  /**
+   * 页面种类（宿主模板注入 data-page）：content = 内容搜索，names = 文件名
+   * 搜索。两个页面共用这套前端代码，只在搜索入口动作、条目点击行为与
+   * 个别文案上有分支。
+   */
+  const PAGE = document.body.dataset.page === 'names' ? 'names' : 'content';
+
+  /**
+   * 文件名搜索页没有替换框 / 过滤器 / 「全部」按钮（没有高级区）：
+   * 垫上惰性占位输入框与按钮，collect / apply / 键盘绑定不用到处判空。
+   * 高级区的两个元素保持 undefined，setAdvanced 直接早退。
+   */
+  for (const key of ['replace', 'filters', 'btnSearchAll']) {
+    if (!els[key]) {
+      els[key] = document.createElement(key === 'btnSearchAll' ? 'button' : 'input');
+    }
+  }
+
+  /**
+   * 分组标题的「定位」按钮：revealInExplorer 显示对应文件 / 目录，
+   * 同时让宿主按点击规则提升优先级。getTarget 返回
+   * { recordId, label, detail }（悬浮条的目标随滚动变化，动态取）。
+   */
+  function makeLocateButton(getTarget) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'g-locate';
+    button.title = T('在资源管理器中定位');
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 12 12');
+    svg.setAttribute('width', '11');
+    svg.setAttribute('height', '11');
+    svg.setAttribute('aria-hidden', 'true');
+    for (const pair of [
+      [6, 0.5, 6, 2.5],
+      [6, 9.5, 6, 11.5],
+      [0.5, 6, 2.5, 6],
+      [9.5, 6, 11.5, 6],
+    ]) {
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('x1', String(pair[0]));
+      line.setAttribute('y1', String(pair[1]));
+      line.setAttribute('x2', String(pair[2]));
+      line.setAttribute('y2', String(pair[3]));
+      line.setAttribute('stroke', 'currentColor');
+      line.setAttribute('stroke-width', '1.2');
+      svg.appendChild(line);
+    }
+    const circle = document.createElementNS(NS, 'circle');
+    circle.setAttribute('cx', '6');
+    circle.setAttribute('cy', '6');
+    circle.setAttribute('r', '3');
+    circle.setAttribute('fill', 'none');
+    circle.setAttribute('stroke', 'currentColor');
+    circle.setAttribute('stroke-width', '1.2');
+    svg.appendChild(circle);
+    button.appendChild(svg);
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const target = getTarget();
+      if (!target) {
+        return;
+      }
+      vscode.postMessage({
+        type: 'locateGroup',
+        recordId: target.recordId,
+        label: target.label,
+        detail: target.detail || '',
+      });
+    });
+    // 焦点在按钮上按 Enter/Space 会冒泡进标题行的折叠热键，必须拦下
+    button.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.stopPropagation();
+      }
+    });
+    return button;
+  }
 
   /**
    * 三个输入框的关键词时间线（宿主推来）：最近用过的在前。
@@ -73,11 +155,14 @@
   };
 
   /**
-   * 虚拟滚动：行高锁死 21px（.r-item 的 height），只把视口 ±VIRTUAL_PAD 范围
-   * 内的行挂进 DOM。几千条命中时 DOM 常驻量从「全部」降到 ~100 行，滚动、
-   * 折叠、键盘导航都不再随结果规模退化。原「显示更多」按钮由它取代。
+   * 虚拟滚动：行高锁死常量（.r-item 的 height 与 JS 必须一致），只把
+   * 视口 ±VIRTUAL_PAD 范围内的行挂进 DOM。几千条命中时 DOM 常驻量从
+   * 「全部」降到 ~100 行，滚动、折叠、键盘导航都不再随结果规模退化。
+   * 行高按页面区分：内容搜索单行 21px；文件名搜索的条目是两行
+   * （文件名 + 所在目录），整页统一 34px（分组标题行同步抬高），
+   * 保证 flatRows 的「下标 × 行高」算术在整页内成立。
    */
-  const ROW_H = 21;
+  const ROW_H = PAGE === 'names' ? 34 : 21;
   const VIRTUAL_PAD = 20;
 
   /** 文件分组的折叠键：label+detail 稳定标识一个分组，跨整卡重建保留。 */
@@ -100,23 +185,29 @@
     }
     const el = document.createElement('div');
     el.className = 'empty';
-    el.textContent = T('输入内容后按 Enter 开始搜索');
+    el.textContent = T(
+      PAGE === 'names' ? '输入文件名后按 Enter 开始搜索' : '输入内容后按 Enter 开始搜索',
+    );
     return el;
   })();
 
   function collect() {
     const mode = document.querySelector('input[name="mode"]:checked');
+    const flag = (id) => {
+      const box = document.getElementById(id);
+      return box ? box.checked : false;
+    };
     state.query = els.query.value;
     state.replace = els.replace.value;
     state.filters = els.filters.value;
     state.mode = mode ? mode.value : 'normal';
     // 方向选项已删：导航固定向下；state.direction 字段保留只为旧存档兼容
     state.direction = 'down';
-    state.caseSensitive = $('caseSensitive').checked;
-    state.wholeWord = $('wholeWord').checked;
-    state.dotAll = $('dotAll').checked;
-    state.wrapAround = $('wrapAround').checked;
-    state.inSelection = $('inSelection').checked;
+    state.caseSensitive = flag('caseSensitive');
+    state.wholeWord = flag('wholeWord');
+    state.dotAll = flag('dotAll');
+    state.wrapAround = flag('wrapAround');
+    state.inSelection = flag('inSelection');
     return state;
   }
 
@@ -128,19 +219,32 @@
     document.querySelectorAll('input[name="mode"]').forEach((radio) => {
       radio.checked = radio.value === state.mode;
     });
-    $('caseSensitive').checked = Boolean(state.caseSensitive);
-    $('wholeWord').checked = Boolean(state.wholeWord);
-    $('dotAll').checked = Boolean(state.dotAll);
-    $('wrapAround').checked = Boolean(state.wrapAround);
-    $('inSelection').checked = Boolean(state.inSelection);
+    const check = (id, value) => {
+      const box = document.getElementById(id);
+      if (box) {
+        box.checked = Boolean(value);
+      }
+    };
+    check('caseSensitive', state.caseSensitive);
+    check('wholeWord', state.wholeWord);
+    check('dotAll', state.dotAll);
+    check('wrapAround', state.wrapAround);
+    check('inSelection', state.inSelection);
     setAdvanced(Boolean(state.advanced));
   }
 
   function setAdvanced(on) {
     state.advanced = on;
+    // 文件名搜索页没有高级区：只记状态，不碰不存在的 DOM
+    if (!els.advanced || !els.btnAdvanced) {
+      return;
+    }
     els.advanced.hidden = !on;
     els.btnAdvanced.setAttribute('aria-expanded', String(on));
-    els.btnAdvanced.querySelector('.btn-text').textContent = on ? T('收起') : T('高级');
+    const text = els.btnAdvanced.querySelector('.btn-text');
+    if (text) {
+      text.textContent = on ? T('收起') : T('高级');
+    }
     // 高度全交给 flex：高级区自然高度，结果区吃满剩余空间，无需 JS 重算
   }
 
@@ -204,6 +308,10 @@
   }
 
   function updateSummary() {
+    // 文件搜索页没有结果头（0.1.127）
+    if (!els.histSummary) {
+      return;
+    }
     els.histSummary.textContent =
       order.length === 0 ? T('搜索结果') : T('搜索结果（{n}）', { n: order.length });
     updateToggleAll();
@@ -315,36 +423,62 @@
   /** rows 由调用方传入：懒渲染后续分块也要写进同一张表，否则导航选中
    * 懒渲染区间的行时查不到（0.1.60 之前行只在挂载时拷贝一次）。 */
   /**
-   * 结果条目行（21px，绝对定位）。与文件标题行（buildHeadRow）唯一区别是
-   * 内容缩进一档；行里的 id 是导航和卸载的钥匙，dataset.id 必须是数字字符串。
+   * 结果条目行（绝对定位，行高 = ROW_H）。与文件标题行（buildHeadRow）唯一
+   * 区别是内容缩进一档；行里的 id 是导航和卸载的钥匙，dataset.id 必须是数字
+   * 字符串。
+   * - 内容搜索：单行「行号 + 代码预览」，点击跳转到命中行；
+   * - 文件名搜索：两行「完整文件名（带命中高亮）/ 所在目录（项目根相对
+   *   路径）」，点击打开文件。
    */
   function buildRow(record, item) {
     const row = document.createElement('div');
     row.className = 'r-item';
     row.tabIndex = 0;
     row.dataset.id = String(item.id);
-    row.title = T('第 {line} 行，第 {col} 列', { line: item.line, col: item.column });
 
-    const line = document.createElement('span');
-    line.className = 'r-line';
-    line.textContent = String(item.line);
-
-    const code = document.createElement('span');
-    code.className = 'r-code';
     const prefix = Math.max(0, Math.min(item.prefix, item.preview.length));
     const hitEnd = Math.max(prefix, Math.min(prefix + item.matchLen, item.preview.length));
-    code.appendChild(document.createTextNode(item.preview.slice(0, prefix)));
-    if (hitEnd > prefix) {
-      const mark = document.createElement('mark');
-      mark.textContent = item.preview.slice(prefix, hitEnd);
-      code.appendChild(mark);
+    const highlight = (el) => {
+      el.appendChild(document.createTextNode(item.preview.slice(0, prefix)));
+      if (hitEnd > prefix) {
+        const mark = document.createElement('mark');
+        mark.textContent = item.preview.slice(prefix, hitEnd);
+        el.appendChild(mark);
+      }
+      el.appendChild(document.createTextNode(item.preview.slice(hitEnd)));
+    };
+
+    if (PAGE === 'names') {
+      row.title = (item.dir ? item.dir + '/' : '') + item.preview;
+      const name = document.createElement('div');
+      name.className = 'r-name';
+      highlight(name);
+      const dir = document.createElement('div');
+      dir.className = 'r-dir';
+      dir.textContent = item.dir || '.';
+      row.appendChild(name);
+      row.appendChild(dir);
+    } else {
+      row.title = T('第 {line} 行，第 {col} 列', { line: item.line, col: item.column });
+
+      const line = document.createElement('span');
+      line.className = 'r-line';
+      line.textContent = String(item.line);
+
+      const code = document.createElement('span');
+      code.className = 'r-code';
+      highlight(code);
+
+      row.appendChild(line);
+      row.appendChild(code);
     }
-    code.appendChild(document.createTextNode(item.preview.slice(hitEnd)));
 
-    row.appendChild(line);
-    row.appendChild(code);
-
-    const reveal = () => vscode.postMessage({ type: 'reveal', recordId: record.id, id: item.id });
+    const reveal = () =>
+      vscode.postMessage(
+        PAGE === 'names'
+          ? { type: 'revealFile', recordId: record.id, id: item.id }
+          : { type: 'reveal', recordId: record.id, id: item.id },
+      );
     row.addEventListener('click', reveal);
     row.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || event.key === ' ') {
@@ -378,6 +512,7 @@
         ? T('该文件命中数超过单文件上限，只保留了前 {n} 条', { n: group.items.length })
         : T('点击折叠 / 展开'));
 
+    const open = !entry.collapsed.has(groupKey(group));
     const chev = document.createElement('span');
     chev.className = 'chev' + (open ? ' open' : '');
 
@@ -387,7 +522,7 @@
 
     const count = document.createElement('span');
     count.className = 'g-count';
-    count.textContent = T('{n} 处', { n: group.items.length }) + (group.truncated ? '+' : '');
+    count.textContent = groupCountLabel(group);
 
     const detail = document.createElement('span');
     detail.className = 'detail';
@@ -398,6 +533,11 @@
     head.appendChild(label);
     head.appendChild(count);
     head.appendChild(detail);
+    head.appendChild(makeLocateButton(() => ({
+      recordId: entry.record.id,
+      label: group.label,
+      detail: group.detail,
+    })));
     syncHeadRow(entry, group, head);
 
     const toggle = () => {
@@ -432,7 +572,17 @@
   function rebuildFlatRows(entry) {
     const rows = [];
     const headRows = [];
+    // 文件名搜索页（0.1.126）：条目平铺，不渲染目录分组标题行——分组只承担
+    // 「按目录优先级排序」的数据职责，展示上就是一份文件列表（headRows 为空，
+    // 悬浮标题条自然不会出现）。
+    const flat = PAGE === 'names';
     for (const group of entry.record.groups) {
+      if (flat) {
+        for (const item of group.items) {
+          rows.push({ item, group });
+        }
+        continue;
+      }
       rows.push({ head: true, group });
       headRows.push(rows.length - 1);
       if (entry.collapsed.has(groupKey(group))) {
@@ -498,6 +648,18 @@
     bar.appendChild(label);
     bar.appendChild(count);
     bar.appendChild(detail);
+    // 悬浮条上的定位按钮：目标随滚动变化，点击时读 sticky.current
+    bar.appendChild(
+      makeLocateButton(() =>
+        sticky.current
+          ? {
+              recordId: sticky.current.entry.record.id,
+              label: sticky.current.group.label,
+              detail: sticky.current.group.detail,
+            }
+          : null,
+      ),
+    );
     bar.addEventListener('click', () => {
       const current = sticky.current;
       if (!current) {
@@ -612,9 +774,157 @@
     sticky.bar.querySelector('.g-label').textContent = group.label;
     sticky.bar.querySelector('.detail').textContent = group.detail || '';
     sticky.bar.querySelector('.detail').title = group.detail || '';
-    sticky.bar.querySelector('.g-count').textContent =
-      T('{n} 处', { n: group.items.length }) + (group.truncated ? '+' : '');
+    sticky.bar.querySelector('.g-count').textContent = groupCountLabel(group);
     sticky.bar.title = T('当前位置：{d}，点击折叠', { d: group.detail || group.label });
+  }
+
+  // ---- 浮层滚动条（0.1.126）：原生滚动条隐藏，滑条浮在 .results 上 ----
+  // 不占布局空间（竖向不再吃掉一列内容宽度）；默认 opacity 0.35 淡显，
+  // 滚动 / 悬停 / 拖动时加到 1，停止操作 700ms 后淡回。轨道不接鼠标事件，
+  // 拖动只发生在滑块上。几何只在变化时重写，滚动帧只改 transform。
+
+  const scrollbar = { drag: null, fadeTimer: null, geo: { top: -1, h: -1, left: -1, w: -1 } };
+  const MIN_THUMB = 24;
+
+  function updateScrollbars() {
+    const vBar = els.sbV;
+    const hBar = els.sbH;
+    if (!vBar || !hBar) {
+      return;
+    }
+    const el = els.results;
+    // 轨道几何对齐 .results 盒：状态行出现/消失、面板拖宽时跟随
+    const top = el.offsetTop;
+    const height = el.offsetHeight;
+    const left = el.offsetLeft;
+    const width = el.offsetWidth;
+    const geo = scrollbar.geo;
+    if (geo.top !== top) {
+      geo.top = top;
+      vBar.style.top = top + 'px';
+      hBar.style.top = top + height - 9 + 'px';
+    }
+    if (geo.h !== height) {
+      geo.h = height;
+      vBar.style.height = height + 'px';
+      hBar.style.top = top + height - 9 + 'px';
+    }
+    if (geo.left !== left) {
+      geo.left = left;
+      hBar.style.left = left + 'px';
+      vBar.style.left = left + width - 9 + 'px';
+    }
+    if (geo.w !== width) {
+      geo.w = width;
+      hBar.style.width = width + 'px';
+      vBar.style.left = left + width - 9 + 'px';
+    }
+
+    // 纵向滑条：长度按可视比例（最小 24px 可抓），位置按滚动比例
+    const vThumb = vBar.firstElementChild;
+    if (el.scrollHeight <= el.clientHeight + 1) {
+      vBar.hidden = true;
+    } else {
+      vBar.hidden = false;
+      const thumbH = Math.max(MIN_THUMB, Math.floor((el.clientHeight * el.clientHeight) / el.scrollHeight));
+      const maxThumbTop = el.clientHeight - thumbH;
+      const thumbTop = Math.round((el.scrollTop / (el.scrollHeight - el.clientHeight)) * maxThumbTop);
+      vThumb.style.height = thumbH + 'px';
+      vThumb.style.transform = 'translateY(' + thumbTop + 'px)';
+    }
+    // 横向滑条：同款算术
+    const hThumb = hBar.firstElementChild;
+    if (el.scrollWidth <= el.clientWidth + 1) {
+      hBar.hidden = true;
+    } else {
+      hBar.hidden = false;
+      const thumbW = Math.max(MIN_THUMB, Math.floor((el.clientWidth * el.clientWidth) / el.scrollWidth));
+      const maxThumbLeft = el.clientWidth - thumbW;
+      const thumbLeft = Math.round((el.scrollLeft / (el.scrollWidth - el.clientWidth)) * maxThumbLeft);
+      hThumb.style.width = thumbW + 'px';
+      hThumb.style.transform = 'translateX(' + thumbLeft + 'px)';
+    }
+  }
+
+  /** 淡回半透明：滚动停止 700ms 后（拖动中由 'scrolling' 类保持高亮）。 */
+  function scheduleScrollbarFade() {
+    if (scrollbar.fadeTimer) {
+      clearTimeout(scrollbar.fadeTimer);
+    }
+    scrollbar.fadeTimer = setTimeout(() => {
+      scrollbar.fadeTimer = null;
+      els.pane.classList.remove('scrolling');
+    }, 700);
+  }
+
+  function startScrollbarDrag(bar, thumb, axis, event) {
+    const el = els.results;
+    const trackLen = axis === 'y' ? el.clientHeight : el.clientWidth;
+    const scrollLen =
+      axis === 'y'
+        ? el.scrollHeight - el.clientHeight
+        : el.scrollWidth - el.clientWidth;
+    if (scrollLen <= 0) {
+      return;
+    }
+    const thumbLen = axis === 'y' ? thumb.offsetHeight : thumb.offsetWidth;
+    scrollbar.drag = {
+      bar,
+      axis,
+      start: axis === 'y' ? event.clientY : event.clientX,
+      startScroll: axis === 'y' ? el.scrollTop : el.scrollLeft,
+      maxScroll: scrollLen,
+      maxThumb: Math.max(1, trackLen - Math.min(thumbLen, trackLen)),
+    };
+    bar.classList.add('dragging');
+    els.pane.classList.add('scrolling');
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function bindScrollbarDrag(bar, axis) {
+    if (!bar) {
+      return;
+    }
+    bar.firstElementChild.addEventListener('mousedown', (event) => {
+      startScrollbarDrag(bar, bar.firstElementChild, axis, event);
+    });
+  }
+
+  bindScrollbarDrag(els.sbV, 'y');
+  bindScrollbarDrag(els.sbH, 'x');
+
+  window.addEventListener('mousemove', (event) => {
+    const drag = scrollbar.drag;
+    if (!drag) {
+      return;
+    }
+    const pos = drag.axis === 'y' ? event.clientY : event.clientX;
+    const delta = ((pos - drag.start) / drag.maxThumb) * drag.maxScroll;
+    if (drag.axis === 'y') {
+      els.results.scrollTop = drag.startScroll + delta;
+    } else {
+      els.results.scrollLeft = drag.startScroll + delta;
+    }
+    scheduleScrollbarFade();
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (!scrollbar.drag) {
+      return;
+    }
+    scrollbar.drag.bar.classList.remove('dragging');
+    scrollbar.drag = null;
+    scheduleScrollbarFade();
+  });
+
+  if (els.results) {
+    els.results.addEventListener('mouseenter', () => {
+      els.pane.classList.add('sb-hover');
+    });
+    els.results.addEventListener('mouseleave', () => {
+      els.pane.classList.remove('sb-hover');
+    });
   }
 
   /**
@@ -627,6 +937,8 @@
     for (const entry of records.values()) {
       renderVirtual(entry);
     }
+    // 内容总高/总宽变了（折叠、增量插入、收尾），滑条几何跟着刷新
+    updateScrollbars();
   }
 
   /**
@@ -744,9 +1056,13 @@
     notice.className = 'notice';
     const text = document.createElement('span');
     text.className = 'notice-text';
-    text.textContent = T('已达到匹配上限，只列出了前 {n} 条，未列出的部分没有统计', {
-      n: formatCount(record.total || 0),
-    });
+    text.textContent = PAGE === 'names'
+      ? T('已达到上限，只列出了前 {n} 个文件', {
+          n: formatCount(record.total || 0),
+        })
+      : T('已达到匹配上限，只列出了前 {n} 条，未列出的部分没有统计', {
+          n: formatCount(record.total || 0),
+        });
     notice.appendChild(text);
     // 重载窗口后从历史恢复的卡片没有原始查询条件，点了也统计不了，干脆不给按钮
     if (record.exactAvailable !== false) {
@@ -769,17 +1085,27 @@
     return Number(value || 0).toLocaleString();
   }
 
+  /**
+   * 分组计数文案：内容搜索是「N 处+」（截断加号在文案之后），
+   * 文件名搜索的分组就是 N 个文件名，只显示数字（加号贴数字）。
+   */
+  function groupCountLabel(group) {
+    return PAGE === 'names'
+      ? formatCount(group.items.length) + (group.truncated ? '+' : '')
+      : T('{n} 处', { n: group.items.length }) + (group.truncated ? '+' : '');
+  }
+
   /** 卡片头 / 底部状态行共用的「处数」文案。 */
   function totalLabel(record) {
-    const listed = record.total || 0;
+    const listed = formatCount(record.total || 0) + (record.truncated ? '+' : '');
     if (typeof record.exactTotal === 'number') {
       return T('{listed} / {total} 处', {
-        listed: formatCount(listed),
+        listed: formatCount(record.total || 0),
         total: formatCount(record.exactTotal),
       });
     }
-    // `20,000+ 处` 而不是 `20,000 处+`：加号要贴住数字
-    return T('{n} 处', { n: formatCount(listed) + (record.truncated ? '+' : '') });
+    // 文件名搜索没有「处」的概念：直接显示匹配文件数（加号贴数字）
+    return PAGE === 'names' ? listed : T('{n} 处', { n: listed });
   }
 
   function buildSizeBadge(bytes) {
@@ -1263,8 +1589,28 @@
     els.hitPos.hidden = false;
   }
 
-  els.btnSearch.addEventListener('click', () => send('search'));
-  els.btnSearchAll.addEventListener('click', () => send('findInFiles'));
+  // 文件名搜索页：输入即搜（防抖 300ms，停顿即触发），没有搜索按钮；
+  // 空关键字也照发——宿主会清掉上一场结果，列表跟着输入走。
+  // Enter 立即触发（取消挂着的防抖），↑/↓ 翻历史同样触发。
+  let liveTimer = null;
+  function triggerLiveSearch() {
+    if (PAGE !== 'names') {
+      return;
+    }
+    if (liveTimer) {
+      clearTimeout(liveTimer);
+    }
+    liveTimer = setTimeout(() => {
+      liveTimer = null;
+      send('findFileNames');
+    }, 300);
+  }
+  if (PAGE === 'names') {
+    els.query.addEventListener('input', triggerLiveSearch);
+  } else {
+    els.btnSearch.addEventListener('click', () => send('search'));
+    els.btnSearchAll.addEventListener('click', () => send('findInFiles'));
+  }
 
   /**
    * 给一个输入框接上 ↑/↓ 翻历史。单行输入框里上下键本来没有默认行为，
@@ -1304,17 +1650,26 @@
       collect();
       vscode.setState(state);
       publishState();
+      // 文件名搜索页：翻历史选中的词也直接开搜
+      triggerLiveSearch();
     });
   }
 
   bindHistory(els.query, 'query');
-  bindHistory(els.filters, 'filters');
-  bindHistory(els.replace, 'replace');
+  if (PAGE !== 'names') {
+    bindHistory(els.filters, 'filters');
+    bindHistory(els.replace, 'replace');
+  }
 
   els.query.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      send('search');
+      // Enter 立即搜：挂着的实时防抖一并取消，避免紧接着又发一场
+      if (liveTimer) {
+        clearTimeout(liveTimer);
+        liveTimer = null;
+      }
+      send(PAGE === 'names' ? 'findFileNames' : 'search');
     } else if (event.key === 'Enter' && event.shiftKey) {
       event.preventDefault();
       send('prev');
@@ -1324,41 +1679,58 @@
     }
   });
 
-  els.replace.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      send('replaceOne');
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      send('focusEditor');
-    }
-  });
+  if (PAGE !== 'names') {
+    els.replace.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        send('replaceOne');
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        send('focusEditor');
+      }
+    });
 
-  els.filters.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      send('findInFiles');
-    }
-  });
+    els.filters.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        send('findInFiles');
+      }
+    });
 
-  els.btnAdvanced.addEventListener('click', () => {
-    setAdvanced(els.advanced.hidden);
-    vscode.setState(state);
-    publishState();
-  });
+    els.btnAdvanced.addEventListener('click', () => {
+      setAdvanced(els.advanced.hidden);
+      vscode.setState(state);
+      publishState();
+    });
+  }
 
-  els.btnClearAll.addEventListener('click', () => send('clearResults'));
+  // 文件名搜索页没有「清空」（清掉输入即清空结果）与折叠/展开全部按钮
+  if (els.btnClearAll) {
+    els.btnClearAll.addEventListener('click', () => send('clearResults'));
+  }
 
   // 搜索中的「停止」：状态行右侧的小链接，替代旧版右下角通知上的取消按钮
-  els.btnStop.addEventListener('click', () => send('cancelSearch'));
-
-  els.btnCollapseAll.addEventListener('click', () => {
-    setAllExpanded(false);
+  els.btnStop.addEventListener('click', () => {
+    // 文件名搜索：挂着的实时触发一并取消——否则停止后 300ms 内又会开新场，
+    // 表现为「停不掉」
+    if (liveTimer) {
+      clearTimeout(liveTimer);
+      liveTimer = null;
+    }
+    send('cancelSearch');
   });
 
-  els.btnExpandAll.addEventListener('click', () => {
-    setAllExpanded(true);
-  });
+  if (els.btnCollapseAll) {
+    els.btnCollapseAll.addEventListener('click', () => {
+      setAllExpanded(false);
+    });
+  }
+
+  if (els.btnExpandAll) {
+    els.btnExpandAll.addEventListener('click', () => {
+      setAllExpanded(true);
+    });
+  }
 
   document.addEventListener('click', (event) => {
     const target = event.target;
@@ -1544,6 +1916,10 @@
       for (const entry of records.values()) {
         renderVirtual(entry);
       }
+      // 滚动时滑条加深，停止 700ms 后淡回半透明
+      els.pane.classList.add('scrolling');
+      scheduleScrollbarFade();
+      updateScrollbars();
     },
     { passive: true },
   );
@@ -1554,6 +1930,7 @@
         renderVirtual(entry);
       }
       syncStickyPos();
+      updateScrollbars();
     }).observe(els.results);
   }
   /* ResizeObserver 回调里的 syncStickyPos() 不带 entry：此时悬浮条多半是
@@ -1561,6 +1938,7 @@
 
   updateSummary();
   updateEmpty();
+  updateScrollbars();
 
   vscode.postMessage({ type: 'ready' });
 })();

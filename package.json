@@ -2,7 +2,7 @@
   "name": "search",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "0.1.123",
+  "version": "0.1.127",
   "publisher": "flysearch",
   "license": "MIT",
   "engines": {
@@ -21,7 +21,8 @@
   "icon": "media/icon.png",
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onView:flySearch.panel"
+    "onView:flySearch.panel",
+    "onView:flySearch.files"
   ],
   "contributes": {
     "viewsContainers": {
@@ -35,6 +36,11 @@
     },
     "views": {
       "flySearch": [
+        {
+          "id": "flySearch.files",
+          "name": "%view.files.name%",
+          "type": "webview"
+        },
         {
           "id": "flySearch.panel",
           "name": "%view.name%",
@@ -106,6 +112,11 @@
       {
         "command": "flySearch.findInFiles",
         "title": "%command.findInFiles%",
+        "category": "%command.category%"
+      },
+      {
+        "command": "flySearch.openFiles",
+        "title": "%command.openFiles%",
         "category": "%command.category%"
       },
       {

@@ -49,14 +49,45 @@ test('store：bump 传播 + 持久化往返 + 快照独立', () => {
 
     const snap = store.snapshot();
     const key = (p) => p.replace(/\\/g, '/').toLowerCase();
-    assert.equal(snap[key(path.join(root, 'a', 'b'))], 2, '直接父目录计 2 次');
-    assert.equal(snap[key(path.join(root, 'a'))], 3, '祖先收到全部点击的传播');
-    assert.equal(snap[key(path.join(root, 'a', 'c'))], 1);
-    assert.equal(scoreOf(snap, path.join(root, 'a', 'b')), 2, 'scoreOf 查表（大小写/分隔符归一）');
+    // 递减规则（0.1.124）：文件自身 +（链长+1）=3，所在目录 +2，最外层 +1。
+    // a/b 收到两次 x.ts 点击各 +2；a 收到两次 +1 与一次 y.ts 的 +1。
+    assert.equal(snap[key(path.join(root, 'a', 'b'))], 4, '直接父目录按递减计 2+2 次');
+    assert.equal(snap[key(path.join(root, 'a'))], 3, '祖先收到全部点击的递减传播');
+    assert.equal(snap[key(path.join(root, 'a', 'c'))], 2);
+    assert.equal(snap[key(path.join(root, 'a', 'b', 'x.ts'))], 6, '被点文件自身最高分（3+3）');
+    assert.equal(scoreOf(snap, path.join(root, 'a', 'b')), 4, 'scoreOf 查表（大小写/分隔符归一）');
 
     // 新实例从同一文件恢复
     const store2 = createDirPriorityStore(dir);
     assert.deepEqual(store2.snapshot(), snap, '重启后从文件恢复');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('store：递减提升——文件自身最高、目录逐级递减；目录目标自身最高（0.1.124）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prio-dec-'));
+  try {
+    const store = createDirPriorityStore(dir);
+    const root = path.join(dir, 'ws');
+    // 点击 root/a/b/c/x.ts：文件 +4，a/b/c +3，a/b +2，a +1
+    store.bump(path.join(root, 'a', 'b', 'c', 'x.ts'), [root]);
+    let snap = store.snapshot();
+    assert.equal(snap[key(path.join(root, 'a', 'b', 'c', 'x.ts'))], 4, '文件自身最高');
+    assert.equal(snap[key(path.join(root, 'a', 'b', 'c'))], 3, '所在目录次高');
+    assert.equal(snap[key(path.join(root, 'a', 'b'))], 2, '祖父目录再递减');
+    assert.equal(snap[key(path.join(root, 'a'))], 1, '最外层 +1');
+    assert.equal(snap[key(root)], undefined, '根本身不计数');
+
+    // 目录作为目标（文件名搜索页的「定位」按钮）：目录自身拿最高分，祖先递减
+    store.bump(path.join(root, 'a', 'b'), [root]);
+    snap = store.snapshot();
+    assert.equal(snap[key(path.join(root, 'a', 'b'))], 4, '目录定位：自身 +2，累计 2+2');
+    assert.equal(snap[key(path.join(root, 'a'))], 2, '祖先递减传播');
+
+    // 目标归一化后等于工作区根本身：直接忽略（根不是排序粒度）
+    store.bump(root, [root]);
+    assert.equal(store.snapshot()[key(root)], undefined, '根目标不计数');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -78,7 +109,7 @@ test('store：超过上限淘汰计数最小的条目', () => {
     }
     const snap = store.snapshot();
     assert.ok(Object.keys(snap).length <= MAX_ENTRIES, '不超过上限');
-    assert.equal(snap[key(hot)], 3, '热目录在淘汰中幸存（传播的 hot 键 + hot/a 键，两者计数最高）');
+    assert.equal(snap[key(hot)], 3, '热目录在淘汰中幸存（3 次点击各 +1，链长 1；冷文件只有 +2）');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

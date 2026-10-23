@@ -1,11 +1,15 @@
 /**
- * 目录优先级（0.1.118）：记录用户点击搜索结果条目的次数，按**目录**聚合。
+ * 目录优先级：记录用户点击搜索结果条目（或分组定位按钮）的次数，按
+ * 「目标 + 沿途目录」聚合，**逐级递减**提升。
  *
- * 语义（对应「优先搜索对应目录/父目录」）：点击 root/a/b/c/x.ts 一次，
- * `a/b/c`、`a/b`、`a` 各 +1（逐级向上传播到工作区根为止）——这样
- * - 显示侧：文件分组按「其父目录的计数」排序，点得多的目录结果靠前；
- * - 遍历侧：包含热目录的子树条目计数更高，先派发先扫描（祖先已传播，
- *   条目直接查自己的计数即可）。
+ * 语义（0.1.124 起的明确规则）：点击 root/a/b/c/x.ts 一次——
+ * - 文件自身 +（N+1）：被点中的文件下次搜索既优先扫描（其直属目录拿到
+ *   目录链最高分）也在结果里按自身分数排到同类前面；
+ * - `a/b/c`（所在目录）+N、`a/b` +(N-1)、`a` +1 —— 离文件越近的目录
+ *   提升越多，沿途每个目录都依次递减（N = 目录链长度）。
+ * 这样：
+ * - 显示侧：文件分组按 max(目录分, 文件分) 排序，点得多的目录靠前；
+ * - 遍历侧：条目（目录）按自身分数降序派发，热子树先遍历先扫描。
  *
  * 存储：storageUri 下的 JSON 文件（ext host 直读写，不进渲染进程——
  * 0.1.97 的教训）。规模有硬上限（MAX_ENTRIES，超限淘汰计数最小的），
@@ -20,8 +24,11 @@ const FILE_NAME = 'dir-priority.v1.json';
 const MAX_STORE_BYTES = 256 * 1024;
 
 export interface DirPriorityStore {
-  /** 点击了一个结果文件：其父目录与各级祖先（到工作区根为止）各 +1 */
-  bump(fileFsPath: string, roots: readonly string[]): void;
+  /**
+   * 点击了一个结果条目：目标自身最高分、沿途目录逐级递减提升。
+   * target 通常是文件路径；传目录路径时目录自身拿最高分（分组「定位」按钮用）。
+   */
+  bump(targetFsPath: string, roots: readonly string[]): void;
   /** 当前计数的副本（搜索开始时快照，场内不变） */
   snapshot(): Record<string, number>;
 }
@@ -150,26 +157,37 @@ export function createDirPriorityStore(
   };
 
   return {
-    bump(fileFsPath, roots) {
-      // 目录链：父目录逐级向上（不含根）。链为空有两种情形：文件就在根下
-      //（平铺工作区，如 Downloads/1022/log——目录粒度在这里没有任何区分度，
-      // 0.1.120 之前点击因此**静默不计**），或文件不在工作区里。
-      const dirs = ancestorDirs(fileFsPath, roots);
-      const underRoot = underAnyRoot(fileFsPath, roots);
+    bump(targetFsPath, roots) {
+      // 归一化后等于某个工作区根：根不是遍历条目，计它只会失真，直接忽略。
+      // （目录「定位」按钮可能拿到根目录本身的分组——根直属文件的那一组。）
+      const normTarget = normDir(targetFsPath);
+      const isRoot = roots.some(
+        (candidate) =>
+          normDir(candidate.replace(/[\\/]+$/, '')) === normTarget,
+      );
+      if (isRoot) {
+        return;
+      }
+      // 目录链：从目标的父目录逐级向上（不含根）。链为空有两种情形：目标
+      // 就在根下（平铺工作区——目录链为空时目标自身的分数是唯一的区分度），
+      // 或目标不在工作区里（不记）。
+      const dirs = ancestorDirs(targetFsPath, roots);
+      const underRoot = underAnyRoot(targetFsPath, roots);
       if (dirs.length === 0 && !underRoot) {
         return;
       }
-      // 被点文件本身也记 1 分：平铺根目录里只有它能把自己顶到前排；
-      // 嵌套目录里重复点同一文件也会让它在其目录的兄弟中排前
-      counts[normDir(fileFsPath)] = (counts[normDir(fileFsPath)] ?? 0) + 1;
-      for (const dir of dirs) {
-        const key = normDir(dir);
-        counts[key] = (counts[key] ?? 0) + 1;
+      // 递减提升：目标自身最高（链长 + 1），所在目录次之（链长），
+      // 越往上越少，最外层 +1。被点中的文件/目录由此在其兄弟中排最前。
+      const top = dirs.length + 1;
+      counts[normTarget] = (counts[normTarget] ?? 0) + top;
+      for (let i = 0; i < dirs.length; i += 1) {
+        const key = normDir(dirs[i]);
+        counts[key] = (counts[key] ?? 0) + (dirs.length - i);
       }
       enforceCap();
       save();
       log?.(
-        `dir priority: ${dirs[0] ?? fileFsPath} +${dirs.length + 1} ` +
+        `dir priority: ${targetFsPath} +${top} chain=${dirs.length} ` +
           `(total ${Object.keys(counts).length} dirs)`,
       );
     },

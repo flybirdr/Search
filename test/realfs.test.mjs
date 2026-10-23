@@ -226,7 +226,10 @@ const vscodeStub = {
     showInformationMessage: async () => undefined,
     showTextDocument: async () => editor,
     registerWebviewViewProvider: (_id, instance) => {
-      provider = instance;
+      // 只捕获内容搜索面板（扩展还注册了文件名搜索页，见 files.test.mjs）
+      if (_id === 'flySearch.panel') {
+        provider = instance;
+      }
       return { dispose: () => undefined };
     },
     onDidChangeVisibleTextEditors: () => ({ dispose: () => undefined }),

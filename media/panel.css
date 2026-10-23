@@ -48,9 +48,8 @@ body {
   padding: 8px 10px 10px;
 }
 
-/* 顶部几件固定高度，任何情况下都不许被压扁 */
-.search-row,
-.sub-row {
+/* 顶部搜索行固定高度，任何情况下都不许被压扁 */
+.search-row {
   flex: none;
 }
 
@@ -176,26 +175,11 @@ button.link:hover {
   background: transparent;
 }
 
-.sub-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-/* 提示占满左侧可收缩空间，把「高级」顶到最右 */
-.sub-row > .hint {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.sub-row > button {
-  flex: none;
-}
-
+/*
+ * 结果分组头的小箭头：给定方形盒 + 不参与 flex 收缩：否则窄面板下会被压扁，
+ * 旋转后越界被裁。高级切换按钮已不用箭头（只显示文字）。
+ */
 .chev {
-  /* 结果分组头的小箭头：给定方形盒 + 不参与 flex 收缩：否则窄面板下会被压扁，
-     旋转后越界被裁。高级切换按钮已不用箭头（只显示文字）。 */
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -223,14 +207,6 @@ button.link:hover {
 
 .chev.open::before {
   transform: rotate(45deg) translate(-0.58px, -0.58px);
-}
-
-.hint {
-  font-size: 10px;
-  color: var(--vscode-descriptionForeground);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .advanced {
@@ -326,7 +302,12 @@ legend {
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
   padding: 2px 0;
-  flex: none;
+  /* 占满剩余宽度：进度文案可能很长（路径 / 统计），不能把右侧按钮顶出去 */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /*
@@ -338,9 +319,16 @@ legend {
   display: none;
 }
 
-/* 状态行变成真实盒子后，空态收起要整行一起判断：
-   文字为空且停止按钮隐藏时收起，避免面板里白留一行高度 */
-.status-row:not(:has(.status:not(:empty))):not(:has(#btnStop:not([hidden]))) {
+/* 「高级」开关住在状态行右端（原独立提示行已删） */
+.status-row .adv-end {
+  margin-left: auto;
+}
+
+/* 空态收起：文字为空且停止按钮隐藏时收起——但内容搜索页的「高级」
+   开关常驻这行，有它在就不能收（否则空闲时无处点开高级区） */
+.status-row:not(:has(.status:not(:empty))):not(:has(#btnStop:not([hidden]))):not(
+    :has(#btnAdvanced)
+  ) {
   display: none;
 }
 
@@ -419,14 +407,18 @@ legend {
 }
 
 .results {
-  /* 结果区自己滚动，高度由分隔条控制；面板主体仍按内容滚动 */
+  /* 结果区自己滚动（横竖都是），高度由分隔条控制；面板主体仍按内容滚动。
+   * 横向滚动条放这层（0.1.125）：此前横向滚动在各卡片的 .rec-body 上，
+   * 只有把卡片滚到底部才能看到那条横向滚动条——放在外层后只要有内容
+   * 超宽就始终可见。卡片（.record）因此放宽到 max-content，
+   * 由这层统一出滚动条。 */
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 5px;
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   /*
    * 不用 scrollbar-gutter: stable：常驻槽位在没有滚动条的内容旁边
    * 留一条空白竖带，非常难看。滚动条按需出现，走下面的细样式；
@@ -435,25 +427,46 @@ legend {
   overflow-anchor: none;
 }
 
-/* 高级区和结果区的滚动条统一成细样式：贴边半透明，不占视觉重心 */
-.advanced::-webkit-scrollbar,
-.results::-webkit-scrollbar {
+/* 卡片按内容放宽（最宽行决定），窄卡至少占满一整行；横向滚动由 .results 统一负责 */
+.record {
+  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
+  border-radius: 3px;
+  width: max-content;
+  min-width: 100%;
+  /* 结果区是「固定高度 + 自己滚动」的 flex 容器，卡片不能被压缩成半截 */
+  flex: none;
+}
+
+/* 高级区的滚动条统一成细样式：贴边半透明，不占视觉重心 */
+.advanced::-webkit-scrollbar {
   width: 8px;
 }
 
-.advanced::-webkit-scrollbar-thumb,
-.results::-webkit-scrollbar-thumb {
+.advanced::-webkit-scrollbar-thumb {
   background: var(--vscode-scrollbarSlider-background);
 }
 
-.advanced::-webkit-scrollbar-thumb:hover,
-.results::-webkit-scrollbar-thumb:hover {
+.advanced::-webkit-scrollbar-thumb:hover {
   background: var(--vscode-scrollbarSlider-hoverBackground);
 }
 
-.advanced::-webkit-scrollbar-track,
-.results::-webkit-scrollbar-track {
+.advanced::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/*
+ * 结果区的原生滚动条整体隐藏（0.1.126）：竖向滚动条会占掉一列布局宽度。
+ * 滚动条由浮层滑条（.sb，见文件末尾）接管——不占布局空间，默认半透明，
+ * 滚动 / 悬停 / 拖动时加深。
+ */
+.results {
+  scrollbar-width: none;
+}
+
+.results::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .results-pane {
@@ -479,14 +492,6 @@ legend {
 .results-pane.is-empty {
   flex: 0 1 auto;
   min-height: 0;
-}
-
-.record {
-  border: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.2));
-  border-radius: 3px;
-  min-width: 0;
-  /* 结果区是「固定高度 + 自己滚动」的 flex 容器，卡片不能被压缩成半截 */
-  flex: none;
 }
 
 .results > .empty {
@@ -548,17 +553,6 @@ legend {
   font-variant-numeric: tabular-nums;
 }
 
-.ver {
-  margin-left: 6px;
-  padding: 0 3px;
-  border-radius: 2px;
-  font-size: 9px;
-  font-variant-numeric: tabular-nums;
-  color: var(--vscode-descriptionForeground);
-  background: var(--vscode-badge-background, rgba(128, 128, 128, 0.16));
-  opacity: 0.9;
-}
-
 .rec-time {
   flex: none;
   font-size: 10px;
@@ -589,10 +583,13 @@ legend {
   color: var(--vscode-foreground);
 }
 
-/* 横向滚动容器：高度随内容自适应，所以 overflow-y 用 hidden 不会裁掉内容 */
+/*
+ * 卡片正文：横向滚动已上移到 .results（卡片本身按 max-content 放宽，
+ * 不会溢出），这里只保留纵向裁剪。scrollbar-width: thin 留给极端情况。
+ */
 .rec-body {
   padding: 0 4px 4px;
-  overflow-x: auto;
+  overflow-x: hidden;
   overflow-y: hidden;
   scrollbar-width: thin;
 }
@@ -605,23 +602,6 @@ legend {
 .rec-body > .empty,
 .rec-body > .notice {
   width: 100%;
-}
-
-.rec-body::-webkit-scrollbar {
-  height: 10px;
-  width: 10px;
-}
-
-.rec-body::-webkit-scrollbar-thumb {
-  background: var(--vscode-scrollbarSlider-background);
-}
-
-.rec-body::-webkit-scrollbar-thumb:hover {
-  background: var(--vscode-scrollbarSlider-hoverBackground);
-}
-
-.rec-body::-webkit-scrollbar-track {
-  background: transparent;
 }
 
 .notice {
@@ -767,6 +747,37 @@ legend {
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * 「定位」按钮（标题行尾部的小准星）：revealInExplorer + 提升目录优先级。
+ * 悬停行时才浮现（与 .rec-close 同策略），不挤占常驻视觉；点击热键不冒泡。
+ */
+.g-locate {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.v-head:hover .g-locate,
+.sticky-head:hover .g-locate,
+.g-locate:focus-visible {
+  opacity: 1;
+}
+
+.g-locate:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+}
+
 .v-head .detail,
 .sticky-head .detail {
   flex: 0 1 auto;
@@ -860,4 +871,109 @@ mark {
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
   white-space: normal;
+}
+
+/* ---------- 文件名搜索页专属 ---------- */
+
+/*
+ * 文件名搜索只保留最新一场结果，卡片折叠条（搜索词 / 统计）没有存在意义，
+ * 整体隐藏；卡片边框也一并去掉，看起来就是一份普通的结果列表。
+ * 折叠 / 展开全部与「清空」按钮仍在结果头，分组折叠照常可用。
+ */
+body[data-page='names'] .rec-head {
+  display: none;
+}
+
+body[data-page='names'] .record {
+  border: none;
+}
+
+/*
+ * 两行条目（0.1.125）：第一行完整文件名（带命中高亮），第二行所在目录
+ * （项目根相对路径）。行高 34px 与 panel.js 的 ROW_H 常量必须一致——
+ * flatRows 的「下标 × 行高」虚拟算术依赖这个值，改任何一边要同步另一边。
+ * 分组标题行 / 悬浮条同步抬高，整页行高统一。
+ */
+body[data-page='names'] .v-head,
+body[data-page='names'] .sticky-head {
+  height: 34px;
+}
+
+body[data-page='names'] .r-item {
+  display: block;
+  height: 34px;
+  padding: 3px 4px 3px 14px;
+}
+
+body[data-page='names'] .r-name {
+  font-size: 12px;
+  line-height: 16px;
+  white-space: pre;
+}
+
+body[data-page='names'] .r-dir {
+  font-size: 10px;
+  line-height: 12px;
+  color: var(--vscode-descriptionForeground);
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 浮层滚动条（结果区，0.1.126） ---------- */
+
+/*
+ * 原生滚动条隐藏后由这两个浮层接管：绝对定位在 .results-pane 上（不占
+ * .results 布局空间，内容吃满整行宽度），几何由 JS 对齐 .results 盒。
+ * 默认 opacity 0.35（淡显半透明），滚动 / 悬停 / 拖动时加到 1；
+ * 轨道 pointer-events: none——不挡行点击，拖动只发生在滑块上。
+ */
+.sb {
+  position: absolute;
+  z-index: 4;
+  pointer-events: none;
+  opacity: 0.35;
+  transition: opacity 0.25s ease;
+}
+
+.sb-v {
+  top: 0;
+  right: 0;
+  width: 9px;
+}
+
+.sb-h {
+  left: 0;
+  height: 9px;
+}
+
+.sb-thumb {
+  position: absolute;
+  pointer-events: auto;
+  cursor: default;
+  background: var(--vscode-scrollbarSlider-background);
+  border-radius: 4px;
+}
+
+.sb-v .sb-thumb {
+  top: 0;
+  right: 1.5px;
+  width: 6px;
+}
+
+.sb-h .sb-thumb {
+  left: 0;
+  bottom: 1.5px;
+  height: 6px;
+}
+
+.sb-thumb:hover,
+.sb.dragging .sb-thumb {
+  background: var(--vscode-scrollbarSlider-hoverBackground);
+}
+
+.results-pane.sb-hover .sb,
+.results-pane.scrolling .sb,
+.sb.dragging {
+  opacity: 1;
 }

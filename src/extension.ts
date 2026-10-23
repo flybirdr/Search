@@ -35,6 +35,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     {
       onAction: (action, state) => controller.handleAction(action, state),
       onReveal: (recordId, id) => void controller.reveal(recordId, id),
+      // 分组标题上的「定位」按钮（悬浮条同款）：资源管理器显示 + 提升优先级
+      onLocate: (recordId, label, detail) => void controller.locateGroup(recordId, label, detail),
       onRemoveRecord: (recordId) => controller.removeRecord(recordId),
       onExactCount: (recordId) => void controller.countExact(recordId),
       onReady: () => undefined,
@@ -47,6 +49,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // 结果跟着工作区走：重载窗口 / 重启后仍在，直到手动清空
   controller.restoreHistory();
 
+  // 文件名搜索页：只匹配文件名的独立视图，展示 / 交互 / 优先级与内容搜索对齐
+  const filesProvider = new PanelView(
+    context.extensionUri,
+    {
+      onAction: (action, state) => controller.handleFilesAction(action, state),
+      onRevealFile: (recordId, id) => void controller.revealFile(recordId, id),
+      onLocate: (recordId, label, detail) => void controller.locateGroup(recordId, label, detail),
+      onRemoveRecord: (recordId) => controller.removeFileRecord(recordId),
+      onReady: () => undefined,
+    },
+    controller.defaultFilesState(),
+    context.extension?.packageJSON?.version ?? '0.0.0',
+    { state: context.workspaceState },
+    { viewType: 'flySearch.files', stateKey: 'flySearch.filesState', page: 'names' },
+  );
+  controller.attachFiles(filesProvider);
+  // 最近一场文件名搜索结果跟着工作区走（重载窗口后恢复）
+  controller.restoreFileHistory();
+
   const register = (id: string, handler: () => unknown) =>
     context.subscriptions.push(vscode.commands.registerCommand(id, handler));
 
@@ -54,7 +75,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     highlighter,
     controller,
     output,
-    vscode.window.registerWebviewViewProvider(PanelView.viewType, provider, {
+    vscode.window.registerWebviewViewProvider(provider.viewType, provider, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+    vscode.window.registerWebviewViewProvider(filesProvider.viewType, filesProvider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
     vscode.window.onDidChangeVisibleTextEditors(() => highlighter.applyMarksToVisibleEditors()),
@@ -73,6 +97,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   register('flySearch.clearMarks', () => controller.clearMarksCommand());
   register('flySearch.copyMarked', () => controller.copyMarked());
   register('flySearch.findInFiles', () => controller.findInFilesFromCommand());
+  register('flySearch.openFiles', () => void vscode.commands.executeCommand('flySearch.files.focus'));
   register('flySearch.selfCheck', () => controller.selfCheck());
   register('flySearch.showLog', () => output.show());
 

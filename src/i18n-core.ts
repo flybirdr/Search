@@ -9,7 +9,6 @@ export const EN: Record<string, string> = {
     'Search every file in the workspace (filters from Advanced)',
   高级: 'Advanced',
   收起: 'Less',
-  'Enter 搜索 · Esc 回到编辑区': 'Enter to search · Esc to editor',
   替换为: 'Replace with',
   '替换内容，可用 $1 或命名组': 'Replacement; $1 and named groups are supported',
   搜索模式: 'Search mode',
@@ -50,8 +49,19 @@ export const EN: Record<string, string> = {
   折叠全部: 'Collapse all',
   展开全部: 'Expand all',
   '输入内容后按 Enter 开始搜索': 'Type something and press Enter to search',
+  '输入文件名后按 Enter 开始搜索': 'Type a file name and press Enter to search',
   本次搜索用时: 'Search time',
   扫描文件总大小: 'Total size scanned',
+
+  // ── 文件名搜索页（html.ts / panel.js / controller.ts） ──
+  要查找的文件名: 'File name to find',
+  在资源管理器中定位: 'Reveal in Explorer',
+  '已达到上限，只列出了前 {n} 个文件': 'Limit reached: only the first {n} files are listed',
+  按文件名: 'By file name',
+  '普通匹配 · 区分大小写': 'Plain · case-sensitive',
+  '无法打开文件：{f}': 'Cannot open file: {f}',
+  '在 {n} 个文件中未找到匹配的文件名 · {ms} ms':
+    'No matching file names in {n} files · {ms} ms',
 
   // ── 面板运行时（panel.js） ──
   '搜索中…': 'Searching…',

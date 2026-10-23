@@ -31,6 +31,8 @@ export interface ResultItem {
   preview: string;
   prefix: number;
   matchLen: number;
+  /** 文件名搜索条目第二行：所在目录（项目根相对路径，根直属为空串） */
+  dir?: string;
 }
 
 export interface ResultGroup {
@@ -39,6 +41,12 @@ export interface ResultGroup {
   items: ResultItem[];
   /** 该文件的匹配数超过了单文件上限，只保留了前若干条。 */
   truncated?: boolean;
+  /**
+   * 分组对应的文件系统路径（内容搜索 = 命中文件；文件名搜索 = 目录）。
+   * 「定位」按钮靠它跳资源管理器并提升优先级；不进历史编码，
+   * 历史恢复的记录由宿主回填（fromDecoded）。
+   */
+  path?: string;
 }
 
 export type SearchScope = 'document' | 'open' | 'files';
@@ -69,10 +77,15 @@ export interface HistoryRecord {
 
 export interface PanelHandlers {
   onAction(action: string, state: PanelState): void | Promise<void>;
-  onReveal(recordId: number, id: number): void;
-  onRemoveRecord(recordId: number): void;
-  /** 用户点了卡片上的「统计完整数量」 */
-  onExactCount(recordId: number): void;
+  /** 内容搜索页：点击条目跳转到命中行。文件名搜索页不需要。 */
+  onReveal?(recordId: number, id: number): void;
+  onRemoveRecord?(recordId: number): void;
+  /** 用户点了卡片上的「统计完整数量」（文件名搜索页没有此按钮） */
+  onExactCount?(recordId: number): void;
+  /** 用户点了文件分组标题上的「定位」按钮（revealInExplorer + 提升优先级） */
+  onLocate?(recordId: number, label: string, detail: string): void | Promise<void>;
+  /** 文件名搜索页：点击结果条目直接打开对应文件 */
+  onRevealFile?(recordId: number, id: number): void | Promise<void>;
   onReady(): void;
 }
 
@@ -84,6 +97,16 @@ export interface PanelStores {
 export const STATE_KEY = 'flySearch.panelState';
 
 export const MAX_RECORDS = 12;
+
+/** 面板页面种类：content = 内容搜索（默认），names = 文件名搜索。 */
+export type PanelPage = 'content' | 'names';
+
+/** 同一套 PanelView 的多实例差异：视图 id / 存储键 / 页面模板。 */
+export interface PanelViewOptions {
+  viewType?: string;
+  stateKey?: string;
+  page?: PanelPage;
+}
 
 export class PanelView implements vscode.WebviewViewProvider {
   public static readonly viewType = 'flySearch.panel';
@@ -101,6 +124,7 @@ export class PanelView implements vscode.WebviewViewProvider {
   private saveTimer?: ReturnType<typeof setTimeout>;
   /** 三个输入框的关键词时间线（搜索词 / 过滤器 / 替换词） */
   private inputHistory: InputHistory;
+  private readonly opts: PanelViewOptions;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -108,9 +132,25 @@ export class PanelView implements vscode.WebviewViewProvider {
     defaults: PanelState,
     private readonly version = '0.0.0',
     private readonly stores: PanelStores = {},
+    opts: PanelViewOptions = {},
   ) {
-    this.state = mergeState(defaults, stores.state?.get<Partial<PanelState>>(STATE_KEY));
+    this.opts = opts;
+    this.state = mergeState(defaults, stores.state?.get<Partial<PanelState>>(this.stateKey));
     this.inputHistory = normalizeInputHistory(stores.state?.get(INPUT_HISTORY_KEY));
+  }
+
+  /** WebviewView 的注册 id：内容搜索面板与文件名搜索页各一个。 */
+  get viewType(): string {
+    return this.opts.viewType ?? PanelView.viewType;
+  }
+
+  private get stateKey(): string {
+    return this.opts.stateKey ?? STATE_KEY;
+  }
+
+  /** 页面种类：决定 HTML 骨架与前端交互分支。 */
+  get page(): PanelPage {
+    return this.opts.page ?? 'content';
   }
 
   get currentState(): PanelState {
@@ -132,6 +172,8 @@ export class PanelView implements vscode.WebviewViewProvider {
         state?: PanelState;
         id?: number;
         recordId?: number;
+        label?: string;
+        detail?: string;
       }) => {
         switch (message.type) {
           case 'ready':
@@ -155,17 +197,43 @@ export class PanelView implements vscode.WebviewViewProvider {
             void this.handlers.onAction(message.action ?? '', this.state);
             break;
           case 'reveal':
-            if (typeof message.recordId === 'number' && typeof message.id === 'number') {
+            if (
+              typeof message.recordId === 'number' &&
+              typeof message.id === 'number' &&
+              this.handlers.onReveal
+            ) {
               this.handlers.onReveal(message.recordId, message.id);
             }
             break;
+          case 'revealFile':
+            if (
+              typeof message.recordId === 'number' &&
+              typeof message.id === 'number' &&
+              this.handlers.onRevealFile
+            ) {
+              void this.handlers.onRevealFile(message.recordId, message.id);
+            }
+            break;
+          case 'locateGroup':
+            if (
+              typeof message.recordId === 'number' &&
+              typeof message.label === 'string' &&
+              this.handlers.onLocate
+            ) {
+              void this.handlers.onLocate(
+                message.recordId,
+                message.label,
+                typeof message.detail === 'string' ? message.detail : '',
+              );
+            }
+            break;
           case 'removeRecord':
-            if (typeof message.recordId === 'number') {
+            if (typeof message.recordId === 'number' && this.handlers.onRemoveRecord) {
               this.handlers.onRemoveRecord(message.recordId);
             }
             break;
           case 'requestExactCount':
-            if (typeof message.recordId === 'number') {
+            if (typeof message.recordId === 'number' && this.handlers.onExactCount) {
               this.handlers.onExactCount(message.recordId);
             }
             break;
@@ -191,7 +259,7 @@ export class PanelView implements vscode.WebviewViewProvider {
 
   async reveal(mode: 'find' | 'replace'): Promise<void> {
     this.state = { ...this.state, advanced: mode === 'replace' ? true : this.state.advanced };
-    await vscode.commands.executeCommand('flySearch.panel.focus');
+    await vscode.commands.executeCommand(`${this.viewType}.focus`);
     if (this.view) {
       this.view.show?.(true);
     }
@@ -216,7 +284,9 @@ export class PanelView implements vscode.WebviewViewProvider {
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
       try {
-        void Promise.resolve(this.stores.state?.update(STATE_KEY, this.state)).catch(() => undefined);
+        void Promise.resolve(
+          this.stores.state?.update(this.stateKey, this.state),
+        ).catch(() => undefined);
       } catch {
         // 存储不可用时静默降级
       }
@@ -439,6 +509,7 @@ export class PanelView implements vscode.WebviewViewProvider {
       bootstrap: this.records,
       bootstrapState: this.state,
       lang: htmlLang(),
+      page: this.page,
     });
   }
 }

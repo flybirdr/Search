@@ -89,6 +89,52 @@ interface SearchRecord {
 
 type SearchDocumentMode = 'record' | 'refresh' | 'count';
 
+/**
+ * 一场文件名搜索的结果（0.1.124）：分组按**目录**聚合，条目 = 匹配的文件名。
+ * 与 SearchRecord 的差别：没有 Range / 预览正文（不读文件内容），
+ * 条目 id → 文件 fsPath 的映射由 `files` 承担；会话内有效，不持久化。
+ */
+interface FileNameRecord {
+  id: number;
+  query: string;
+  scopeLabel: string;
+  optionsLabel: string;
+  groups: ResultGroup[];
+  /** 条目 id → 匹配文件的 fsPath（id 即下标） */
+  files: string[];
+  current: number;
+  elapsed: number;
+  truncated: boolean;
+  time: number;
+  /** 这场搜索是否还在跑 */
+  pending?: boolean;
+  /** 遍历经过的文件总数（未过滤），状态行与日志用 */
+  walked: number;
+}
+
+/** 文件名搜索的持久化结构（只存最新一场）：条目带完整路径，恢复后定位/打开都能用。 */
+interface StoredFileGroup {
+  l: string;
+  d: string;
+  /** 分组的绝对目录路径（「定位」按钮用） */
+  p: string;
+  /** [文件名, 前缀, 匹配长度, 相对目录, 完整路径] */
+  it: [string, number, number, string, string][];
+}
+
+interface StoredFileRecord {
+  v: number;
+  id: number;
+  q: string;
+  sl: string;
+  ol: string;
+  e: number;
+  tr: boolean;
+  t: number;
+  walked: number;
+  g: StoredFileGroup[];
+}
+
 /** 流式通道不可用时（虚拟 / 远程文件系统）整块读入的内存上限 */
 const MAX_WHOLE_READ = 64 * 1024 * 1024;
 /**
@@ -130,6 +176,15 @@ export class SearchController implements vscode.Disposable {
   private searchGeneration = 0;
   /** 「因旋转介质关掉分块」只提示一次，别每场搜索都刷一行 */
   private diskNoticeLogged = false;
+  /** 文件名搜索面板（独立视图）；undefined = 未注册 */
+  private filesPanel?: PanelView;
+  /** 文件名搜索的取消源与在途任务：与内容搜索互相独立，可并行 */
+  private filesCancellation?: vscode.CancellationTokenSource;
+  private filesInFlight?: Promise<void>;
+  /** 文件名搜索的抢占代际 */
+  private filesGeneration = 0;
+  /** 文件名搜索的记录：会话内有效，不持久化（轻量探查，重载不留卡片） */
+  private readonly fileRecords = new Map<number, FileNameRecord>();
 
   constructor(
     private readonly corePromise: Promise<SearchCore>,
@@ -151,6 +206,7 @@ export class SearchController implements vscode.Disposable {
     // 与文件清单缓存同一策略：写 storageUri 文件，完全绕开渲染进程。
     if (paths?.storageDir) {
       this.historyFile = path.join(paths.storageDir, 'search-history.v1.json');
+      this.fileHistoryFile = path.join(paths.storageDir, 'file-search-history.v1.json');
       this.dirPriority = createDirPriorityStore(paths.storageDir, (line) => this.log(line));
     }
   }
@@ -169,6 +225,13 @@ export class SearchController implements vscode.Disposable {
 
   /** 历史持久化文件（storageDir 介质）；undefined = 走 workspaceState（测试）。 */
   private historyFile?: string;
+  /**
+   * 文件名搜索结果的持久化文件：只存**最新一场**（0.1.125 起不按搜索词留
+   * 记录，但重载窗口后像内容搜索一样恢复最近一次结果）。undefined = 测试环境。
+   */
+  private fileHistoryFile?: string;
+  /** 文件名搜索持久化副本大小上限（超出从尾部丢分组，尾部优先级最低） */
+  private static readonly MAX_FILE_HISTORY_BYTES = 1024 * 1024;
   /** 持久化副本大小上限：超过按损坏处理 */
   private static readonly MAX_HISTORY_BYTES = 64 * 1024 * 1024;
 
@@ -426,6 +489,8 @@ export class SearchController implements vscode.Disposable {
       if (!file) {
         return;
       }
+      // 回填分组路径：历史编码不存 path，「定位」按钮在恢复的记录上也要能用
+      group.path = file;
       for (const entry of group.items) {
         const [endLine, endColumn] = item.ends[entry.id] ?? [
           entry.line,
@@ -684,6 +749,544 @@ export class SearchController implements vscode.Disposable {
     this.panel?.setStatus(t('已清空结果记录'));
   }
 
+  // ---- 文件名搜索（独立页面，0.1.124）----
+  // 只匹配文件名、不读文件内容；展示 / 折叠 / 清空 / 优先级逻辑与内容搜索
+  // 共用同一套面板代码与 dirPriority 存储，仅在匹配与交互入口上不同。
+
+  attachFiles(panel: PanelView): void {
+    this.filesPanel = panel;
+  }
+
+  /** 文件名搜索页的初始条件（只有关键字一个输入） */
+  defaultFilesState(): PanelState {
+    return { ...this.defaultState(), query: '', replace: '' };
+  }
+
+  async handleFilesAction(action: string, state: PanelState): Promise<void> {
+    try {
+      switch (action) {
+        case 'findFileNames':
+          await this.runFilesSearch(state);
+          return;
+        case 'cancelSearch':
+          // 提高抢占代际：还在等待退场的实时搜索触发全部作废——否则 Stop 之后
+          // 排队的触发会自动开新场，表现为「停不掉」
+          this.filesGeneration += 1;
+          this.filesCancellation?.cancel();
+          return;
+        case 'clearResults':
+          this.clearFileRecords();
+          return;
+        case 'focusEditor':
+          await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+          return;
+        default:
+          return;
+      }
+    } catch (error) {
+      this.fail(error);
+    }
+  }
+
+  removeFileRecord(recordId: number): void {
+    if (!this.fileRecords.delete(recordId)) {
+      return;
+    }
+    this.filesPanel?.removeRecord(recordId);
+  }
+
+  private clearFileRecords(): void {
+    this.fileRecords.clear();
+    this.filesPanel?.clearRecords();
+    this.filesPanel?.setStatus(t('已清空结果记录'));
+    // 清空也落盘：重载窗口后不再恢复出已被用户清掉的结果
+    this.persistFileHistory();
+  }
+
+  /** 最新一场文件名搜索 → 持久化结构（条目带完整路径）。 */
+  private toStoredFileRecord(record: FileNameRecord): StoredFileRecord {
+    return {
+      v: 1,
+      id: record.id,
+      q: record.query,
+      sl: record.scopeLabel,
+      ol: record.optionsLabel,
+      e: record.elapsed,
+      tr: record.truncated,
+      t: record.time,
+      walked: record.walked,
+      g: record.groups.map((group) => ({
+        l: group.label,
+        d: group.detail,
+        p: group.path ?? '',
+        it: group.items.map(
+          (item) =>
+            [item.preview, item.prefix, item.matchLen, item.dir ?? '', record.files[item.id] ?? ''] as [
+              string,
+              number,
+              number,
+              string,
+              string,
+            ],
+        ),
+      })),
+    };
+  }
+
+  /**
+   * 把最新一场文件名搜索写进 storageDir 文件（单条 JSON，tmp+rename 原子写，
+   * 与内容搜索历史同一策略）。清空后写空表；超预算从尾部丢分组——分组按
+   * 优先级降序排，尾部最不重要。
+   */
+  private persistFileHistory(): void {
+    if (!this.fileHistoryFile) {
+      return;
+    }
+    try {
+      mkdirSync(path.dirname(this.fileHistoryFile), { recursive: true });
+      const tmp = `${this.fileHistoryFile}.tmp`;
+      const record = [...this.fileRecords.values()].filter((entry) => !entry.pending).pop();
+      let text: string;
+      if (!record) {
+        text = JSON.stringify({ v: 1, r: [] });
+      } else {
+        const payload: { v: 1; r: StoredFileRecord[] } = {
+          v: 1,
+          r: [this.toStoredFileRecord(record)],
+        };
+        text = JSON.stringify(payload);
+        while (
+          text.length > SearchController.MAX_FILE_HISTORY_BYTES &&
+          payload.r[0].g.length > 1
+        ) {
+          payload.r[0].g.pop();
+          text = JSON.stringify(payload);
+        }
+        if (text.length > SearchController.MAX_FILE_HISTORY_BYTES) {
+          this.log('file search history oversized, skipped');
+          return;
+        }
+      }
+      writeFileSync(tmp, text);
+      renameSync(tmp, this.fileHistoryFile);
+    } catch (error) {
+      this.log(
+        `file search history persist failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** 启动时恢复最近一场文件名搜索结果（restoreHistory 的文件页对应物）。 */
+  restoreFileHistory(): void {
+    if (!this.fileHistoryFile) {
+      return;
+    }
+    let text = '';
+    try {
+      if (existsSync(this.fileHistoryFile)) {
+        const raw = readFileSync(this.fileHistoryFile, 'utf8');
+        text = raw.length <= SearchController.MAX_FILE_HISTORY_BYTES ? raw : '';
+        if (!text && raw.length > SearchController.MAX_FILE_HISTORY_BYTES) {
+          this.log('file search history oversized, ignored');
+        }
+      }
+    } catch (error) {
+      this.log(
+        `file search history restore failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (!text.trim()) {
+      return;
+    }
+    try {
+      const payload = JSON.parse(text) as { v?: number; r?: StoredFileRecord[] };
+      const stored = payload?.r?.[0];
+      if (!payload || payload.v !== 1 || !stored || !Array.isArray(stored.g)) {
+        return;
+      }
+      const files: string[] = [];
+      const groups: ResultGroup[] = [];
+      for (const group of stored.g) {
+        if (!group || !Array.isArray(group.it) || group.it.length === 0) {
+          continue;
+        }
+        const items: ResultItem[] = [];
+        for (const entry of group.it) {
+          if (!Array.isArray(entry) || typeof entry[0] !== 'string' || typeof entry[4] !== 'string' || !entry[4]) {
+            continue;
+          }
+          const [preview, prefix, matchLen, dir, fsPath] = entry;
+          // id 按「分组顺序 + 组内顺序」连续编号，与 files 下标一一对应
+          const id = files.length;
+          files.push(fsPath);
+          items.push({
+            id,
+            line: 0,
+            column: 0,
+            preview,
+            prefix: Number(prefix) || 0,
+            matchLen: Number(matchLen) || 1,
+            dir: typeof dir === 'string' ? dir : '',
+          });
+        }
+        if (items.length === 0) {
+          continue;
+        }
+        groups.push({
+          label: typeof group.l === 'string' ? group.l : '',
+          detail: typeof group.d === 'string' ? group.d : '',
+          path: typeof group.p === 'string' && group.p ? group.p : undefined,
+          items,
+        });
+      }
+      if (groups.length === 0 || files.length === 0) {
+        return;
+      }
+      const record: FileNameRecord = {
+        id: Number.isFinite(stored.id) ? stored.id : this.nextRecordId,
+        query: typeof stored.q === 'string' ? stored.q : '',
+        scopeLabel: typeof stored.sl === 'string' ? stored.sl : t('按文件名'),
+        optionsLabel: typeof stored.ol === 'string' ? stored.ol : '',
+        groups,
+        files,
+        current: -1,
+        elapsed: Number(stored.e) || 0,
+        truncated: Boolean(stored.tr),
+        time: Number(stored.t) || Date.now(),
+        pending: false,
+        walked: Number(stored.walked) || 0,
+      };
+      this.fileRecords.set(record.id, record);
+      this.nextRecordId = Math.max(this.nextRecordId, record.id + 1);
+      this.filesPanel?.restoreRecords([this.toFilesHistory(record)]);
+      this.log(`file search history restored: ${files.length} files in ${groups.length} dirs`);
+    } catch (error) {
+      this.log(
+        `file search history restore failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** 文件名搜索页：点击条目直接打开文件，并按同一套规则提升优先级。 */
+  async revealFile(recordId: number, id: number): Promise<void> {
+    const record = this.fileRecords.get(recordId);
+    const fsPath = record?.files[id];
+    if (!record || !fsPath) {
+      return;
+    }
+    this.dirPriority?.bump(fsPath, this.workspaceRoots());
+    record.current = id;
+    try {
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fsPath));
+      await vscode.window.showTextDocument(doc, { preview: false });
+    } catch {
+      this.filesPanel?.setStatus(t('无法打开文件：{f}', { f: relativePath(fsPath) }), 'warn');
+      return;
+    }
+    this.filesPanel?.postCurrent(recordId, id, id);
+  }
+
+  /**
+   * 分组标题上的「定位」按钮（内容搜索与文件名搜索共用）：
+   * revealInExplorer 显示对应文件 / 目录，并按点击规则提升其优先级
+   * （文件 → 目录链递减；目录 → 自身最高 + 祖先递减）。
+   */
+  async locateGroup(recordId: number, label: string, detail: string): Promise<void> {
+    const match = (group: ResultGroup): boolean =>
+      group.label === label && group.detail === detail;
+    const contentGroup = this.records.get(recordId)?.groups.find(match);
+    const filesGroup = this.fileRecords.get(recordId)?.groups.find(match);
+    const target = contentGroup?.path ?? filesGroup?.path;
+    if (!target) {
+      return;
+    }
+    this.dirPriority?.bump(target, this.workspaceRoots());
+    try {
+      await vscode.commands.executeCommand('revealInExplorer', vscode.Uri.file(target));
+    } catch (error) {
+      this.fail(error);
+    }
+  }
+
+  /**
+   * 文件名搜索的统一入口：实时搜索（输入即触发）不做双击判定——每次触发
+   * 都是有意的新查询，直接取消在途任务并接管，保证「最后一次输入」胜出。
+   */
+  private async runFilesSearch(state: PanelState): Promise<void> {
+    if (this.filesInFlight) {
+      const gen = ++this.filesGeneration;
+      this.filesCancellation?.cancel();
+      await this.filesInFlight.catch(() => undefined);
+      if (gen !== this.filesGeneration) {
+        // 等待退场期间又有新触发接管，让最新的一场上场
+        return;
+      }
+    }
+
+    const task = this.searchFileNames(state);
+    this.filesInFlight = task;
+    try {
+      await task;
+    } finally {
+      if (this.filesInFlight === task) {
+        this.filesInFlight = undefined;
+      }
+    }
+  }
+
+  private toFilesHistory(record: FileNameRecord): HistoryRecord {
+    return {
+      id: record.id,
+      query: record.query,
+      scope: 'files',
+      scopeLabel: record.scopeLabel,
+      optionsLabel: record.optionsLabel,
+      groups: record.groups.slice(),
+      total: record.files.length,
+      fileCount: record.groups.length,
+      elapsed: record.elapsed,
+      truncated: record.truncated,
+      time: record.time,
+      pending: record.pending,
+      // 文件名搜索没有「统计完整数量」的概念（只数文件名，不扫内容）
+      exactAvailable: false,
+    };
+  }
+
+  /**
+   * 文件名搜索：只匹配文件名，不读文件内容。
+   * - 普通子串匹配、区分大小写（basename.includes(query)），没有其它选项；
+   * - 结果按目录分组，边遍历边出（同一套流式 record/recordGroups 协议）；
+   * - 优先级与内容搜索共用：快照决定遍历派发顺序（热目录先扫）与分组排序，
+   *   点击条目 / 定位按钮照常计数，影响下一场。
+   */
+  private async searchFileNames(state: PanelState): Promise<void> {
+    const panel = this.filesPanel;
+    const query = state.query ?? '';
+    if (!query) {
+      // 实时搜索里输入被清空：安静地收掉结果列表，不弹警告
+      this.fileRecords.clear();
+      panel?.clearRecords();
+      return;
+    }
+    const searchFolders = vscode.workspace.workspaceFolders ?? [];
+    if (searchFolders.length === 0) {
+      panel?.setStatus(t('需要先打开一个工作区文件夹'), 'warn');
+      return;
+    }
+    const config = vscode.workspace.getConfiguration('flySearch');
+    const started = Date.now();
+    // 目录优先级快照：本场内点击不重排本场，只影响下一场（与内容搜索一致）
+    this.searchPriorities = this.dirPriority?.snapshot() ?? {};
+    if (Object.keys(this.searchPriorities).length > 0) {
+      this.log(
+        `dir priority snapshot: ${Object.keys(this.searchPriorities).length} dirs ` +
+          `(max ${Math.max(...Object.values(this.searchPriorities))})`,
+      );
+    }
+    const recordId = this.nextRecordId++;
+    const limit = Math.max(1, config.get<number>('maxMatches', 20000));
+    const include = state.filters || config.get<string>('includeGlob', '**/*');
+    const exclude = config.get<string>('excludeGlob', '');
+
+    const groups: ResultGroup[] = [];
+    const files: string[] = [];
+    let walked = 0;
+    let capped = false;
+    // 文件名搜索不按搜索词留记录（0.1.125）：永远只有最新一场，
+    // 新搜索开始前静默清掉上一场（手动「清空」按钮才给提示文案）
+    this.fileRecords.clear();
+    panel?.clearRecords();
+    const record: FileNameRecord = {
+      id: recordId,
+      query,
+      scopeLabel: t('按文件名'),
+      optionsLabel: t('普通匹配 · 区分大小写'),
+      groups,
+      files,
+      current: -1,
+      elapsed: 0,
+      truncated: false,
+      time: started,
+      pending: true,
+      walked: 0,
+    };
+    this.fileRecords.set(record.id, record);
+    // 卡片立刻进面板：与内容搜索同一套「先开卡、边扫边长」的体验
+    panel?.upsertRecord(this.toFilesHistory(record));
+
+    const groupPrio = new Map<ResultGroup, number>();
+    const groupComparator = (a: ResultGroup, b: ResultGroup): number => {
+      const diff = (groupPrio.get(b) ?? 0) - (groupPrio.get(a) ?? 0);
+      return diff !== 0 ? diff : a.detail.localeCompare(b.detail);
+    };
+    /** 目录 fsPath → 分组：同目录的文件聚进一个分组 */
+    const dirGroups = new Map<string, ResultGroup>();
+    /** 目录本身就是工作区根时（根直属文件那一组）相对路径显示成空串 */
+    const dirDetail = (dir: string): string => {
+      const rel = relativePath(dir);
+      return rel === dir.replace(/\\/g, '/') ? '' : rel;
+    };
+    const addFile = (fsPath: string): void => {
+      const id = files.length;
+      files.push(fsPath);
+      const base = basename(fsPath);
+      const at = base.indexOf(query);
+      const dir = path.dirname(fsPath);
+      const item: ResultItem = {
+        id,
+        line: 0,
+        column: 0,
+        preview: base,
+        prefix: Math.max(0, at),
+        matchLen: query.length,
+        // 条目第二行：所在目录的项目根相对路径（面板两行条目用）
+        dir: dirDetail(dir),
+      };
+      let group = dirGroups.get(dir);
+      if (!group) {
+        group = { label: basename(dir) || dir, detail: dirDetail(dir), items: [], path: dir };
+        dirGroups.set(dir, group);
+        // 展示分 = 目录自身的点击分数（与内容搜索的 max(目录分, 文件分) 同源：
+        // 这里的「文件分」就体现在其所在目录的分数里）
+        groupPrio.set(group, scoreOf(this.searchPriorities, dir));
+        let lo = 0;
+        let hi = groups.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (groupComparator(groups[mid], group) <= 0) {
+            lo = mid + 1;
+          } else {
+            hi = mid;
+          }
+        }
+        groups.splice(lo, 0, group);
+        sendQueue.push(group);
+      }
+      group.items.push(item);
+    };
+
+    /** 待推送的分组（与内容搜索同一套节流下发协议） */
+    const sendQueue: ResultGroup[] = [];
+    let lastFlushAt = 0;
+    const flush = (force: boolean): void => {
+      if (!force && sendQueue.length === 0) {
+        return;
+      }
+      const now = Date.now();
+      if (!force && now - lastFlushAt < STREAM_FLUSH_MS) {
+        return;
+      }
+      lastFlushAt = now;
+      const fresh = sendQueue.splice(0, sendQueue.length);
+      // 每个分组在列表里的最终下标：面板据此把它插到正确位置，而不是一律尾插。
+      // 用一次遍历 + 引用集合取下标——绝不能用 indexOf（O(n)/分组）：宽泛关键词
+      // 在大工作区会产生数万个分组，O(n²) 会把宿主事件循环打满，Stop 都点不动
+      //（0.1.126 文件搜索卡死的根因）。
+      const queued = new Set(fresh);
+      const pairs: { group: ResultGroup; at: number }[] = [];
+      for (let i = 0; i < groups.length; i += 1) {
+        if (queued.has(groups[i])) {
+          pairs.push({ group: groups[i], at: i });
+        }
+      }
+      pairs.sort((a, b) => a.at - b.at);
+      record.elapsed = now - started;
+      panel?.appendRecord(
+        record.id,
+        pairs.map((pair) => pair.group),
+        {
+          total: files.length,
+          fileCount: groups.length,
+          elapsed: record.elapsed,
+          truncated: capped,
+          pending: Boolean(record.pending),
+        },
+        pairs.map((pair) => pair.at),
+      );
+    };
+
+    const cancellation = new vscode.CancellationTokenSource();
+    this.filesCancellation = cancellation;
+    panel?.setBusy(true);
+    try {
+      const it = createWalkStream(include, exclude, undefined, {
+        ...this.walkOpts(),
+        shouldAbort: () => cancellation.token.isCancellationRequested,
+      });
+      try {
+        let r = await it.next();
+        while (!r.done) {
+          if (cancellation.token.isCancellationRequested) {
+            capped = true;
+            break;
+          }
+          walked += 1;
+          const p = r.value;
+          // 只匹配文件名：普通子串、区分大小写，不读文件内容
+          if (basename(p).includes(query)) {
+            if (files.length >= limit) {
+              capped = true;
+              break;
+            }
+            addFile(p);
+          }
+          flush(false);
+          // 周期性让出事件循环：缓冲数据充足时生成器会连续以微任务返回，
+          // 不让出的话 Stop 点击等宏任务消息会被饿死——「Stop 点不动」的一半根因
+          if (walked % 256 === 0) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            if (cancellation.token.isCancellationRequested) {
+              capped = true;
+              break;
+            }
+          }
+          r = await it.next();
+        }
+      } finally {
+        // 取消 / 出错时让遍历同步收尾（worker 会话随之终止）
+        await it.return?.(undefined as unknown as WalkStats);
+      }
+      const found = walked;
+      this.log(
+        `file name search "${query}" done: matched=${files.length} dirs=${groups.length} ` +
+          `walked=${found} capped=${capped} ${Date.now() - started}ms ` +
+          `include=${include} exclude=${exclude}`,
+      );
+      record.truncated = capped;
+      record.walked = walked;
+      flush(true);
+      record.pending = false;
+      record.elapsed = Date.now() - started;
+      panel?.finishRecord(this.toFilesHistory(record));
+      this.persistFileHistory();
+      const skippedNote = capped
+        ? t(' · 已达上限，未扫完 {n} 个文件', { n: Math.max(0, walked - files.length) })
+        : '';
+      panel?.setStatus(
+        files.length === 0
+          ? t('在 {n} 个文件中未找到匹配的文件名 · {ms} ms', { n: walked, ms: record.elapsed }) +
+              skippedNote
+          : skippedNote.replace(/^ · /, ''),
+        files.length === 0 ? 'warn' : 'info',
+      );
+    } catch (error) {
+      record.pending = false;
+      record.elapsed = Date.now() - started;
+      flush(true);
+      panel?.finishRecord(this.toFilesHistory(record));
+      this.persistFileHistory();
+      this.fail(error);
+    } finally {
+      if (this.filesCancellation === cancellation) {
+        this.filesCancellation = undefined;
+      }
+      cancellation.dispose();
+      panel?.setBusy(false);
+    }
+  }
+
   async findAllFromCommand(): Promise<void> {
     const state = await this.requireState();
     if (state) {
@@ -813,6 +1416,7 @@ export class SearchController implements vscode.Disposable {
     const group: ResultGroup = {
       label: basename(doc.uri.fsPath),
       detail: relativePath(doc.uri.fsPath),
+      path: doc.uri.fsPath,
       items,
     };
 
@@ -1038,10 +1642,17 @@ export class SearchController implements vscode.Disposable {
       lastFlushAt = now;
       // 每个分组在列表里的最终下标：面板据此把它插到正确位置，而不是一律尾插。
       // 按升序下发，面板顺序执行「插到第 i 个之前」即可还原同一个顺序。
+      // 一次遍历 + 引用集合取下标（indexOf 是 O(n)/分组，命中数逼近上限时
+      // 总量 O(n²)，会把宿主事件循环打满——文件搜索 0.1.126 卡死的同款根因）。
       const fresh = sendQueue.splice(0, sendQueue.length);
-      const pairs = fresh
-        .map((group) => ({ group, at: groups.indexOf(group) }))
-        .sort((a, b) => a.at - b.at);
+      const queued = new Set(fresh);
+      const pairs: { group: ResultGroup; at: number }[] = [];
+      for (let i = 0; i < groups.length; i += 1) {
+        if (queued.has(groups[i])) {
+          pairs.push({ group: groups[i], at: i });
+        }
+      }
+      pairs.sort((a, b) => a.at - b.at);
       record.elapsed = now - started;
       record.totalBytes = scannedBytes;
       record.truncated = capped || anyGroupTruncated;
@@ -1325,6 +1936,7 @@ export class SearchController implements vscode.Disposable {
               {
                 label: basename(uri),
                 detail: relativePath(uri),
+                path: uri,
                 items,
                 truncated: merged.truncated,
               },
@@ -1394,6 +2006,7 @@ export class SearchController implements vscode.Disposable {
               {
                 label: basename(uri),
                 detail: relativePath(uri),
+                path: uri,
                 items,
                 truncated: result.truncated,
               },
@@ -1692,6 +2305,7 @@ export class SearchController implements vscode.Disposable {
                 {
                   label: basename(uri),
                   detail: relativePath(uri),
+                  path: uri,
                   items,
                   truncated: fileTruncated,
                 },
@@ -1787,6 +2401,7 @@ export class SearchController implements vscode.Disposable {
         {
           label: basename(uri),
           detail: relativePath(uri),
+          path: uri,
           items,
           truncated: fileTruncated,
         },
